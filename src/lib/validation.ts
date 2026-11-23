@@ -53,17 +53,17 @@ export const teacherAttendanceSchema = z.object({
   status: z.enum(["PRESENT", "ABSENT"]),
 });
 
+export const bulkAttendanceSchema = z.object({
+  sessionDate: z.string().date(),
+  sessionTemplateId: z.string().uuid(),
+});
+
 export const studentAttendanceSchema = z
   .object({
     studentId: z.string().uuid(),
     sessionDate: z.string().date(),
     sessionTemplateId: z.string().uuid(),
     status: z.enum(["PRESENT", "ABSENT", "LATE"]),
-    arrivalTime: z.string().regex(/^\d{2}:\d{2}$/).optional(),
-  })
-  .refine((v) => (v.status === "LATE" ? Boolean(v.arrivalTime) : true), {
-    message: "وقت الوصول مطلوب عند اختيار «متأخر»",
-    path: ["arrivalTime"],
   });
 
 export const monthlyEvaluationSchema = z.object({

@@ -1,6 +1,7 @@
 import { db } from "@/lib/db/client";
 import { getTodayISO } from "@/lib/business/date";
 import { getSessionStateContext } from "@/lib/server/session-state.server";
+import { z } from "zod";
 import { AttendanceClient } from "./AttendanceClient";
 
 export const dynamic = "force-dynamic";
@@ -11,7 +12,8 @@ export default async function AttendancePage({
   searchParams: Promise<{ session?: string; date?: string }>;
 }) {
   const params = await searchParams;
-  const date = params.date ?? getTodayISO();
+  const explicitDate = z.string().date().safeParse(params.date);
+  const date = explicitDate.success ? explicitDate.data : getTodayISO();
 
   const sessionTemplates = await db
     .selectFrom("sessionTemplate")
@@ -46,7 +48,9 @@ export default async function AttendancePage({
 
   return (
     <AttendanceClient
+      key={`${date}:${activeSessionId}`}
       date={date}
+      hasExplicitDate={explicitDate.success}
       sessionTemplates={sessionTemplates.map((s) => ({ id: s.id, name: s.name, startTime: s.startTime.toString().slice(0, 5), endTime: s.endTime.toString().slice(0, 5) }))}
       activeSessionId={activeSessionId}
       state={ctx?.state ?? "NOT_SCHOOL_DAY"}

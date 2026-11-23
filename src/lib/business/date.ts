@@ -17,11 +17,20 @@ export function getTodayISO(): string {
   return isoFormatter.format(new Date()); // en-CA locale formats as YYYY-MM-DD
 }
 
+/** Today's ISO date in the browser's local timezone. */
+export function getLocalTodayISO(): string {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 const timeFormatter = new Intl.DateTimeFormat("en-GB", {
   timeZone: APP_TIMEZONE,
   hour: "2-digit",
   minute: "2-digit",
-  hour12: false,
+  hourCycle: "h23",
 });
 
 /** Current wall-clock time in the app's timezone, as "HH:MM". */

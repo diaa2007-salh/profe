@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { Card, CardContent } from "@/components/ui/card";
@@ -11,6 +11,7 @@ import { CheckCheck, Search, TriangleAlert } from "lucide-react";
 import { Ltr } from "@/components/Ltr";
 import { StatusToggle } from "@/components/StatusToggle";
 import { formatFullDate } from "@/lib/domain";
+import { getLocalTodayISO } from "@/lib/business/date";
 import { recordTeacherAttendance, recordStudentAttendance, markAllPresent } from "./actions";
 import type { Selectable } from "kysely";
 import type { Student, StudentAttendance } from "@/lib/db/types";
@@ -33,6 +34,7 @@ interface SessionTemplateInfo {
 
 export function AttendanceClient({
   date,
+  hasExplicitDate,
   sessionTemplates,
   activeSessionId,
   state,
@@ -41,6 +43,7 @@ export function AttendanceClient({
   existingRecords,
 }: {
   date: string;
+  hasExplicitDate: boolean;
   sessionTemplates: SessionTemplateInfo[];
   activeSessionId: string;
   state: DailySessionState;
@@ -51,14 +54,43 @@ export function AttendanceClient({
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [query, setQuery] = useState("");
-  const [arrivalDrafts, setArrivalDrafts] = useState<Record<string, string>>({});
-  const [pendingLateIds, setPendingLateIds] = useState<Set<string>>(new Set());
+  const [optimisticStatuses, setOptimisticStatuses] = useState<Record<string, AttendanceStatus>>({});
+  const studentWrites = useRef(new Map<string, Promise<void>>());
+  const requestSequences = useRef(new Map<string, number>());
 
   const activeSession = sessionTemplates.find((s) => s.id === activeSessionId)!;
   const recordsByStudent = useMemo(() => new Map(existingRecords.map((r) => [r.studentId, r])), [existingRecords]);
+  const pendingStatuses = useMemo(() => {
+    const pending: Record<string, AttendanceStatus> = {};
+    for (const [studentId, status] of Object.entries(optimisticStatuses)) {
+      if (recordsByStudent.get(studentId)?.status !== status) pending[studentId] = status;
+    }
+    return pending;
+  }, [optimisticStatuses, recordsByStudent]);
   const attendanceLocked = state !== "TEACHER_PRESENT";
+  const canConfirmAttendance = STATE_MESSAGE[state] === undefined;
 
   const filteredStudents = useMemo(() => students.filter((s) => s.fullName.includes(query.trim())), [students, query]);
+  const visibleCounts = useMemo(() => {
+    const statuses = new Map(existingRecords.map((record) => [record.studentId, record.status]));
+    for (const [studentId, status] of Object.entries(pendingStatuses)) statuses.set(studentId, status);
+    return [...statuses.values()].reduce(
+      (counts, status) => {
+        counts[status]++;
+        return counts;
+      },
+      { PRESENT: 0, LATE: 0, ABSENT: 0 }
+    );
+  }, [existingRecords, pendingStatuses]);
+
+  useEffect(() => {
+    if (!hasExplicitDate) {
+      const localToday = getLocalTodayISO();
+      if (localToday !== date) {
+        router.replace(`/attendance?session=${activeSessionId}&date=${localToday}`, { scroll: false });
+      }
+    }
+  }, [activeSessionId, date, hasExplicitDate, router]);
 
   function setTeacher(status: "PRESENT" | "ABSENT") {
     const fd = new FormData();
@@ -66,55 +98,109 @@ export function AttendanceClient({
     fd.set("sessionTemplateId", activeSessionId);
     fd.set("status", status);
     startTransition(async () => {
-      const result = await recordTeacherAttendance(fd);
-      if (result.ok) {
-        toast.success(status === "PRESENT" ? "تم تسجيل حضور المعلم" : "تم تسجيل غياب المعلم");
-        router.refresh();
-      } else {
-        toast.error(result.error);
+      try {
+        const result = await recordTeacherAttendance(fd);
+        if (result.ok) {
+          toast.success(status === "PRESENT" ? "تم تسجيل حضور المعلم" : "تم تسجيل غياب المعلم");
+          router.refresh();
+        } else {
+          toast.error(result.error);
+        }
+      } catch {
+        toast.error("تعذّر حفظ حضور المعلم");
       }
     });
   }
 
-  function setStudentStatus(studentId: string, status: AttendanceStatus, arrivalTime?: string) {
+  function setStudentStatus(studentId: string, status: AttendanceStatus) {
+    const sequence = (requestSequences.current.get(studentId) ?? 0) + 1;
+    requestSequences.current.set(studentId, sequence);
+    setOptimisticStatuses((current) => ({ ...current, [studentId]: status }));
+
     const fd = new FormData();
     fd.set("studentId", studentId);
     fd.set("sessionDate", date);
     fd.set("sessionTemplateId", activeSessionId);
     fd.set("status", status);
-    if (arrivalTime) fd.set("arrivalTime", arrivalTime);
-    startTransition(async () => {
+
+    const previousWrite = studentWrites.current.get(studentId) ?? Promise.resolve();
+    const write = previousWrite.catch(() => undefined).then(async () => {
       const result = await recordStudentAttendance(fd);
-      if (result.ok) {
-        toast.success(status === "LATE" && result.lateMinutes != null ? `تم التسجيل — متأخر ${result.lateMinutes} دقيقة` : "تم الحفظ");
-        router.refresh();
-      } else {
-        toast.error(result.error);
-      }
+      if (!result.ok) throw new Error(result.error);
     });
+    studentWrites.current.set(studentId, write);
+
+    void write
+      .then(
+        () => {
+          if (requestSequences.current.get(studentId) === sequence) router.refresh();
+        },
+        (error: unknown) => {
+          toast.error(error instanceof Error ? error.message : "تعذّر حفظ حالة التلميذ");
+          if (requestSequences.current.get(studentId) === sequence) {
+            setOptimisticStatuses((current) => {
+              const next = { ...current };
+              delete next[studentId];
+              return next;
+            });
+            router.refresh();
+          }
+        }
+      )
+      .finally(() => {
+        if (studentWrites.current.get(studentId) === write) studentWrites.current.delete(studentId);
+      });
   }
 
   function handleMarkAllPresent() {
     startTransition(async () => {
-      const result = await markAllPresent(date, activeSessionId, students.map((s) => s.id));
-      if (result.ok) {
-        toast.success("تم تحديد الجميع كحاضرين");
+      try {
+        const result = await markAllPresent(date, activeSessionId);
+        if (!result.ok) {
+          toast.error(result.error);
+          return;
+        }
+
+        if (result.activeCount === 0) {
+          toast.info("تم تأكيد حضورك؛ لا يوجد تلاميذ نشطون.");
+        } else if (result.preparedCount === 0) {
+          toast.success("تم تأكيد حضورك؛ وحُفظت الحالات المسجلة مسبقاً دون تغيير.");
+        } else {
+          toast.success(`تم تأكيد حضورك وتحضير ${result.preparedCount} تلميذاً؛ وحُفظت الحالات المسجلة مسبقاً.`);
+        }
         router.refresh();
-      } else {
-        toast.error(result.error);
+      } catch {
+        toast.error("تعذّر تأكيد الحضور وتحضير التلاميذ");
       }
     });
   }
 
-  const presentCount = existingRecords.filter((r) => r.status === "PRESENT").length;
-  const lateCount = existingRecords.filter((r) => r.status === "LATE").length;
-  const absentCount = existingRecords.filter((r) => r.status === "ABSENT").length;
-
   return (
     <div className="space-y-5">
-      <div className="flex flex-col gap-1">
-        <p className="text-sm text-muted-foreground">{formatFullDate(date)}</p>
-        <h1 className="font-display text-2xl text-foreground">كشف الحضور</h1>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div className="flex flex-col gap-1">
+          <p className="text-sm text-muted-foreground">{formatFullDate(date)}</p>
+          <h1 className="font-display text-2xl text-foreground">كشف الحضور</h1>
+        </div>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <Input
+            aria-label="تاريخ الحضور"
+            type="date"
+            value={date}
+            onChange={(event) => {
+              if (event.target.value) {
+                router.push(`/attendance?session=${activeSessionId}&date=${event.target.value}`);
+              }
+            }}
+            className="sm:w-44"
+          />
+          {canConfirmAttendance && (
+            <Button onClick={handleMarkAllPresent} disabled={pending} className="gap-2 whitespace-nowrap">
+              <CheckCheck className="h-4 w-4" />
+              تأكيد حضوري وتحضير الجميع
+            </Button>
+          )}
+        </div>
       </div>
 
       {sessionTemplates.length > 1 && (
@@ -143,7 +229,7 @@ export function AttendanceClient({
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <span className="text-sm font-medium text-foreground">حضور المعلم</span>
               <StatusToggle
-                value={teacherStatus === "ABSENT" ? "absent" : teacherStatus === "PRESENT" ? "present" : "present"}
+                value={teacherStatus === "ABSENT" ? "absent" : "present"}
                 onChange={(v) => setTeacher(v === "absent" ? "ABSENT" : "PRESENT")}
                 disabled={pending}
               />
@@ -160,16 +246,10 @@ export function AttendanceClient({
 
       {!attendanceLocked && (
         <>
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex items-center gap-4 text-sm tabular">
-              <span className="text-primary">{presentCount} حاضر</span>
-              <span className="text-accent">{lateCount} متأخر</span>
-              <span className="text-destructive">{absentCount} غائب</span>
-            </div>
-            <Button variant="outline" size="sm" onClick={handleMarkAllPresent} disabled={pending} className="gap-1.5">
-              <CheckCheck className="h-3.5 w-3.5" />
-              تحديد الجميع كحاضر
-            </Button>
+          <div className="flex items-center gap-4 text-sm tabular">
+            <span className="text-primary">{visibleCounts.PRESENT} حاضر</span>
+            <span className="text-accent">{visibleCounts.LATE} متأخر</span>
+            <span className="text-destructive">{visibleCounts.ABSENT} غائب</span>
           </div>
 
           <div className="relative">
@@ -180,9 +260,8 @@ export function AttendanceClient({
           <div className="space-y-2">
             {filteredStudents.map((student) => {
               const record = recordsByStudent.get(student.id);
-              const savedStatus: AttendanceStatus = (record?.status as AttendanceStatus) ?? "PRESENT";
-              const status: AttendanceStatus = pendingLateIds.has(student.id) ? "LATE" : savedStatus;
-              const draftArrival = arrivalDrafts[student.id] ?? record?.arrivalTime?.toString().slice(0, 5) ?? "";
+              const status = pendingStatuses[student.id] ?? record?.status ?? "PRESENT";
+              const arrivalTime = record?.arrivalTime?.toString().slice(0, 5);
 
               return (
                 <Card key={student.id}>
@@ -196,43 +275,14 @@ export function AttendanceClient({
                     <div className="flex items-center gap-2">
                       <StatusToggle
                         value={status === "PRESENT" ? "present" : status === "LATE" ? "late" : "absent"}
-                        disabled={pending}
-                        onChange={(v) => {
-                          if (v === "late") {
-                            setPendingLateIds((s) => new Set(s).add(student.id));
-                            return;
-                          }
-                          setPendingLateIds((s) => {
-                            const next = new Set(s);
-                            next.delete(student.id);
-                            return next;
-                          });
-                          setStudentStatus(student.id, v === "present" ? "PRESENT" : "ABSENT");
-                        }}
+                        onChange={(value) =>
+                          setStudentStatus(student.id, value === "present" ? "PRESENT" : value === "late" ? "LATE" : "ABSENT")
+                        }
                       />
-                      {status === "LATE" && (
-                        <div className="flex items-center gap-1.5">
-                          <Input
-                            type="time"
-                            autoFocus={pendingLateIds.has(student.id)}
-                            value={draftArrival}
-                            onChange={(e) => setArrivalDrafts((d) => ({ ...d, [student.id]: e.target.value }))}
-                            onBlur={(e) => {
-                              if (e.target.value) {
-                                setStudentStatus(student.id, "LATE", e.target.value);
-                                setPendingLateIds((s) => {
-                                  const next = new Set(s);
-                                  next.delete(student.id);
-                                  return next;
-                                });
-                              }
-                            }}
-                            className="h-10 w-28 tabular"
-                          />
-                          {record?.lateMinutes != null && !pendingLateIds.has(student.id) && (
-                            <span className="whitespace-nowrap text-xs text-accent">{record.lateMinutes} د</span>
-                          )}
-                        </div>
+                      {status === "LATE" && arrivalTime && (
+                        <span className="text-xs text-accent">
+                          <Ltr>{arrivalTime}</Ltr>
+                        </span>
                       )}
                     </div>
                   </CardContent>

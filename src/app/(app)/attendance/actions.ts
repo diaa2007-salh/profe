@@ -4,11 +4,13 @@ import { revalidatePath } from "next/cache";
 import { auth } from "@/lib/auth/config";
 import { db } from "@/lib/db/client";
 import { getSessionStateContext } from "@/lib/server/session-state.server";
-import { calculateLateMinutes } from "@/lib/business/attendance";
+import { getNowTimeHHMM } from "@/lib/business/date";
 import { canRecordStudentAttendance } from "@/lib/business/session-state";
-import { teacherAttendanceSchema, studentAttendanceSchema } from "@/lib/validation";
+import { bulkAttendanceSchema, teacherAttendanceSchema, studentAttendanceSchema } from "@/lib/validation";
 
-export type ActionResult = { ok: true; lateMinutes?: number } | { ok: false; error: string };
+export type ActionResult =
+  | { ok: true; preparedCount?: number; activeCount?: number }
+  | { ok: false; error: string };
 
 async function requireSession() {
   const session = await auth();
@@ -16,8 +18,20 @@ async function requireSession() {
   return session;
 }
 
+async function isAttendanceOwner(): Promise<boolean> {
+  const session = await requireSession();
+  const userId = session.user?.id;
+  if (!userId) return false;
+  const profile = await db
+    .selectFrom("teacherProfile")
+    .select("id")
+    .where("userId", "=", userId)
+    .executeTakeFirst();
+  return Boolean(profile);
+}
+
 export async function recordTeacherAttendance(formData: FormData): Promise<ActionResult> {
-  await requireSession();
+  if (!(await isAttendanceOwner())) return { ok: false, error: "غير مصرح بتسجيل الحضور" };
 
   const parsed = teacherAttendanceSchema.safeParse(Object.fromEntries(formData));
   if (!parsed.success) return { ok: false, error: "بيانات غير صالحة" };
@@ -66,14 +80,22 @@ export async function recordTeacherAttendance(formData: FormData): Promise<Actio
 }
 
 export async function recordStudentAttendance(formData: FormData): Promise<ActionResult> {
-  await requireSession();
+  if (!(await isAttendanceOwner())) return { ok: false, error: "غير مصرح بتسجيل الحضور" };
 
   const raw = Object.fromEntries(formData);
   const parsed = studentAttendanceSchema.safeParse(raw);
   if (!parsed.success) {
     return { ok: false, error: parsed.error.issues[0]?.message ?? "بيانات غير صالحة" };
   }
-  const { studentId, sessionDate, sessionTemplateId, status, arrivalTime } = parsed.data;
+  const { studentId, sessionDate, sessionTemplateId, status } = parsed.data;
+
+  const student = await db
+    .selectFrom("student")
+    .select("id")
+    .where("id", "=", studentId)
+    .where("isActive", "=", true)
+    .executeTakeFirst();
+  if (!student) return { ok: false, error: "التلميذ غير موجود أو غير نشط" };
 
   // RULE 1/7: server-side re-derivation, not a trusted client flag. This is
   // the exact check the spec says to also verify by attempting a direct
@@ -83,15 +105,7 @@ export async function recordStudentAttendance(formData: FormData): Promise<Actio
     return { ok: false, error: "لا يمكن تسجيل حضور الطلاب لهذه الحصة (المعلم غائب أو الحصة غير فعالة)" };
   }
 
-  let lateMinutes: number | null = null;
-  if (status === "LATE") {
-    if (!arrivalTime) return { ok: false, error: "وقت الوصول مطلوب" };
-    // RULE 6: computed server-side from the real session template times,
-    // never from a client-supplied number.
-    const calc = calculateLateMinutes(ctx.sessionTemplate.startTime, ctx.sessionTemplate.endTime, arrivalTime);
-    if (!calc.ok) return { ok: false, error: calc.error ?? "وقت غير صالح" };
-    lateMinutes = calc.lateMinutes ?? null;
-  }
+  const arrivalTime = status === "LATE" ? getNowTimeHHMM() : null;
 
   try {
     await db
@@ -101,14 +115,14 @@ export async function recordStudentAttendance(formData: FormData): Promise<Actio
         sessionDate,
         sessionTemplateId,
         status,
-        arrivalTime: status === "LATE" ? arrivalTime : null,
-        lateMinutes: status === "LATE" ? lateMinutes : null,
+        arrivalTime,
+        lateMinutes: null,
       })
       .onConflict((oc) =>
         oc.columns(["studentId", "sessionDate", "sessionTemplateId"]).doUpdateSet({
           status,
-          arrivalTime: status === "LATE" ? arrivalTime : null,
-          lateMinutes: status === "LATE" ? lateMinutes : null,
+          arrivalTime,
+          lateMinutes: null,
           updatedAt: new Date(),
         })
       )
@@ -120,43 +134,62 @@ export async function recordStudentAttendance(formData: FormData): Promise<Actio
 
   revalidatePath("/attendance");
   revalidatePath("/");
-  return { ok: true, lateMinutes: lateMinutes ?? undefined };
+  return { ok: true };
 }
 
-export async function markAllPresent(sessionDate: string, sessionTemplateId: string, studentIds: string[]): Promise<ActionResult> {
-  await requireSession();
+export async function markAllPresent(sessionDate: string, sessionTemplateId: string): Promise<ActionResult> {
+  if (!(await isAttendanceOwner())) return { ok: false, error: "غير مصرح بتسجيل الحضور" };
 
-  const ctx = await getSessionStateContext(sessionDate, sessionTemplateId);
-  if (!ctx || !canRecordStudentAttendance(ctx.state)) {
+  const parsed = bulkAttendanceSchema.safeParse({ sessionDate, sessionTemplateId });
+  if (!parsed.success) return { ok: false, error: "بيانات غير صالحة" };
+  const { sessionDate: validDate, sessionTemplateId: validSessionId } = parsed.data;
+  const ctx = await getSessionStateContext(validDate, validSessionId);
+  if (!ctx || !["SCHEDULED", "TEACHER_PRESENT", "TEACHER_ABSENT"].includes(ctx.state)) {
     return { ok: false, error: "لا يمكن تسجيل حضور الطلاب لهذه الحصة" };
   }
-  if (studentIds.length === 0) return { ok: true };
 
   try {
-    await db
-      .insertInto("studentAttendance")
-      .values(
-        studentIds.map((studentId) => ({
-          studentId,
-          sessionDate,
-          sessionTemplateId,
-          status: "PRESENT" as const,
-          arrivalTime: null,
-          lateMinutes: null,
-        }))
-      )
-      .onConflict((oc) =>
-        oc
-          .columns(["studentId", "sessionDate", "sessionTemplateId"])
-          .doUpdateSet({ status: "PRESENT", arrivalTime: null, lateMinutes: null, updatedAt: new Date() })
-      )
-      .execute();
+    const result = await db.transaction().execute(async (trx) => {
+      await trx
+        .insertInto("teacherAttendance")
+        .values({ sessionDate: validDate, sessionTemplateId: validSessionId, status: "PRESENT" })
+        .onConflict((oc) =>
+          oc.columns(["sessionDate", "sessionTemplateId"]).doUpdateSet({ status: "PRESENT", updatedAt: new Date() })
+        )
+        .execute();
+
+      const activeStudents = await trx
+        .selectFrom("student")
+        .select("id")
+        .where("isActive", "=", true)
+        .execute();
+
+      if (activeStudents.length === 0) return { preparedCount: 0, activeCount: 0 };
+
+      const inserted = await trx
+        .insertInto("studentAttendance")
+        .values(
+          activeStudents.map(({ id: studentId }) => ({
+            studentId,
+            sessionDate: validDate,
+            sessionTemplateId: validSessionId,
+            status: "PRESENT" as const,
+            arrivalTime: null,
+            lateMinutes: null,
+          }))
+        )
+        .onConflict((oc) => oc.columns(["studentId", "sessionDate", "sessionTemplateId"]).doNothing())
+        .returning("studentId")
+        .execute();
+
+      return { preparedCount: inserted.length, activeCount: activeStudents.length };
+    });
+
+    revalidatePath("/attendance");
+    revalidatePath("/");
+    return { ok: true, ...result };
   } catch (err) {
     console.error("[attendance] mark-all-present failed", err);
     return { ok: false, error: "تعذّر تحديث الحضور" };
   }
-
-  revalidatePath("/attendance");
-  revalidatePath("/");
-  return { ok: true };
 }

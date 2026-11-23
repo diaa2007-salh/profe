@@ -38,14 +38,17 @@ this description):
   `session_template_id IS NULL`) cannot overlap. Requires the
   `btree_gist` extension.
 - **`student_attendance` — `CHECK (late_requires_arrival)`**: `LATE`
-  requires both `arrival_time` and `late_minutes`; every other status
+  requires `arrival_time`; `late_minutes` is optional so existing calculated
+  values remain intact while new records can omit them. Every other status
   requires both to be `NULL`. Enforced at the database, not just in the
-  Server Action.
+  Server Action. Migration `0002_optional_late_minutes.sql` updates this
+  constraint without changing existing attendance data.
 - **`student_attendance` — `UNIQUE (student_id, session_date,
-  session_template_id)`**: the idempotency rule (spec section 19/8) — a
-  second write for the same trio updates in place (the Server Action uses
-  `ON CONFLICT ... DO UPDATE`); a raw `INSERT` bypassing that is rejected
-  outright.
+  session_template_id)`**: attendance is keyed per student, date, and
+  session because a day may contain multiple sessions. Single-student
+  updates use `ON CONFLICT ... DO UPDATE`; bulk preparation uses
+  `ON CONFLICT ... DO NOTHING` to preserve an existing ABSENT/LATE record.
+  This unique constraint already exists in the initial schema.
 - **`academic_year` — partial unique index `WHERE is_active`**: at most one
   academic year active at a time.
 - **`monthly_evaluation` — `UNIQUE (student_id, year, month)`**: one

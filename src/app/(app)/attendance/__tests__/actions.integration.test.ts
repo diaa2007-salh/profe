@@ -8,11 +8,15 @@ vi.mock("@/lib/auth/config", () => ({
 }));
 
 // Imported after the mock so the module picks up the stubbed auth().
-const { recordTeacherAttendance, recordStudentAttendance } = await import("../actions");
+const { recordTeacherAttendance, recordStudentAttendance, markAllPresent } = await import("../actions");
 
 const TEST_DATE = "2026-11-10"; // a Tuesday, safely inside the fixture academic year below
+const TEST_USER_ID = "00000000-0000-0000-0000-000000000001";
 let sessionId: string;
 let studentId: string;
+let lateStudentId: string;
+let createdTestUser = false;
+let createdTestProfile = false;
 
 function fd(fields: Record<string, string>) {
   const f = new FormData();
@@ -21,6 +25,27 @@ function fd(fields: Record<string, string>) {
 }
 
 beforeAll(async () => {
+  const existingUser = await db.selectFrom("appUser").select("id").where("id", "=", TEST_USER_ID).executeTakeFirst();
+  if (!existingUser) {
+    await db
+      .insertInto("appUser")
+      .values({ id: TEST_USER_ID, email: "test-attendance@example.invalid", passwordHash: "not-a-real-hash" })
+      .execute();
+    createdTestUser = true;
+  }
+  const existingProfile = await db
+    .selectFrom("teacherProfile")
+    .select("id")
+    .where("userId", "=", TEST_USER_ID)
+    .executeTakeFirst();
+  if (!existingProfile) {
+    await db
+      .insertInto("teacherProfile")
+      .values({ userId: TEST_USER_ID, fullName: "TEST-TEACHER-ATTENDANCE" })
+      .execute();
+    createdTestProfile = true;
+  }
+
   // Real rows in the real database — cleaned up in afterAll, not rolled
   // back, since the code under test uses the shared `db` singleton rather
   // than an injectable per-test transaction.
@@ -43,16 +68,25 @@ beforeAll(async () => {
     .returning(["id"])
     .executeTakeFirstOrThrow();
   studentId = student.id;
+  const lateStudent = await db
+    .insertInto("student")
+    .values({ fullName: "TEST-STUDENT-LATE-ATTENDANCE" })
+    .returning(["id"])
+    .executeTakeFirstOrThrow();
+  lateStudentId = lateStudent.id;
 });
 
 afterAll(async () => {
-  await db.deleteFrom("studentAttendance").where("studentId", "=", studentId).execute();
+  await db.deleteFrom("studentAttendance").where("sessionTemplateId", "=", sessionId).execute();
   await db.deleteFrom("teacherAttendance").where("sessionTemplateId", "=", sessionId).execute();
   await db.deleteFrom("sessionCancellation").where("sessionTemplateId", "=", sessionId).execute();
   await db.deleteFrom("holiday").where("name", "=", "TEST-HOLIDAY").execute();
   await db.deleteFrom("student").where("id", "=", studentId).execute();
+  await db.deleteFrom("student").where("id", "=", lateStudentId).execute();
   await db.deleteFrom("sessionTemplate").where("id", "=", sessionId).execute();
   await db.deleteFrom("academicYear").where("label", "=", "TEST-YEAR").execute();
+  if (createdTestProfile) await db.deleteFrom("teacherProfile").where("userId", "=", TEST_USER_ID).execute();
+  if (createdTestUser) await db.deleteFrom("appUser").where("id", "=", TEST_USER_ID).execute();
   await db.destroy();
 });
 
@@ -142,15 +176,11 @@ describe("attendance integration — with an active academic year", () => {
     expect(rows[0].status).toBe("ABSENT"); // reflects the latest call
   });
 
-  it("late requires a valid arrivalTime and computes lateMinutes server-side, ignoring any client-supplied number", async () => {
-    const badForm = fd({ studentId, sessionDate: TEST_DATE, sessionTemplateId: sessionId, status: "LATE" });
-    const bad = await recordStudentAttendance(badForm); // no arrivalTime at all
-    expect(bad.ok).toBe(false);
-
-    const goodForm = fd({ studentId, sessionDate: TEST_DATE, sessionTemplateId: sessionId, status: "LATE", arrivalTime: "05:47" });
-    const good = await recordStudentAttendance(goodForm);
-    expect(good.ok).toBe(true);
-    if (good.ok) expect(good.lateMinutes).toBe(17); // 05:30 -> 05:47, the spec's own example
+  it("late records the server time without requiring or accepting client minutes", async () => {
+    const result = await recordStudentAttendance(
+      fd({ studentId, sessionDate: TEST_DATE, sessionTemplateId: sessionId, status: "LATE", arrivalTime: "25:99" })
+    );
+    expect(result.ok).toBe(true);
 
     const row = await db
       .selectFrom("studentAttendance")
@@ -159,8 +189,9 @@ describe("attendance integration — with an active academic year", () => {
       .where("sessionDate", "=", TEST_DATE)
       .where("sessionTemplateId", "=", sessionId)
       .executeTakeFirstOrThrow();
-    expect(row.lateMinutes).toBe(17);
-    expect(row.arrivalTime?.toString().slice(0, 5)).toBe("05:47");
+    expect(row.lateMinutes).toBeNull();
+    expect(row.arrivalTime?.toString().slice(0, 5)).toMatch(/^(?:[01]\d|2[0-3]):[0-5]\d$/);
+    expect(row.arrivalTime?.toString().slice(0, 5)).not.toBe("25:99");
   });
 
   it("Teacher PRESENT + Student ABSENT -> succeeds", async () => {
@@ -178,13 +209,6 @@ describe("attendance integration — with an active academic year", () => {
     expect(row.status).toBe("ABSENT");
     expect(row.arrivalTime).toBeNull();
     expect(row.lateMinutes).toBeNull();
-  });
-
-  it("arrivalTime before session start is rejected, not recorded as a negative/zero lateMinutes", async () => {
-    const result = await recordStudentAttendance(
-      fd({ studentId, sessionDate: TEST_DATE, sessionTemplateId: sessionId, status: "LATE", arrivalTime: "05:10" })
-    );
-    expect(result.ok).toBe(false);
   });
 
   it("spec 10 (literal) — a raw duplicate INSERT bypassing the action's upsert is rejected by the DB unique constraint itself", async () => {
@@ -206,6 +230,56 @@ describe("attendance integration — with an active academic year", () => {
   it("a date outside the active academic year's range is rejected even though a year IS active", async () => {
     const result = await recordTeacherAttendance(fd({ sessionDate: "2026-01-01", sessionTemplateId: sessionId, status: "PRESENT" }));
     expect(result.ok).toBe(false);
+  });
+
+  it("bulk confirms the teacher, inserts active students once, and preserves existing ABSENT and LATE statuses", async () => {
+    const bulkDate = "2026-11-12";
+    await db.deleteFrom("studentAttendance").where("sessionDate", "=", bulkDate).where("sessionTemplateId", "=", sessionId).execute();
+    await db
+      .insertInto("teacherAttendance")
+      .values({ sessionDate: bulkDate, sessionTemplateId: sessionId, status: "ABSENT" })
+      .execute();
+    await db
+      .insertInto("studentAttendance")
+      .values({ studentId, sessionDate: bulkDate, sessionTemplateId: sessionId, status: "ABSENT" })
+      .execute();
+    await db
+      .insertInto("studentAttendance")
+      .values({
+        studentId: lateStudentId,
+        sessionDate: bulkDate,
+        sessionTemplateId: sessionId,
+        status: "LATE",
+        arrivalTime: "05:47",
+        lateMinutes: 17,
+      })
+      .execute();
+    const activeStudentIds = await db.selectFrom("student").select("id").where("isActive", "=", true).execute();
+
+    const first = await markAllPresent(bulkDate, sessionId);
+    expect(first).toEqual({ ok: true, preparedCount: activeStudentIds.length - 2, activeCount: activeStudentIds.length });
+
+    const second = await markAllPresent(bulkDate, sessionId);
+    expect(second).toEqual({ ok: true, preparedCount: 0, activeCount: activeStudentIds.length });
+
+    const attendanceRows = await db
+      .selectFrom("studentAttendance")
+      .selectAll()
+      .where("sessionDate", "=", bulkDate)
+      .where("sessionTemplateId", "=", sessionId)
+      .execute();
+    expect(attendanceRows).toHaveLength(activeStudentIds.length);
+    expect(attendanceRows.find((row) => row.studentId === studentId)?.status).toBe("ABSENT");
+    expect(attendanceRows.find((row) => row.studentId === lateStudentId)?.status).toBe("LATE");
+    expect(attendanceRows.filter((row) => row.studentId !== studentId && row.studentId !== lateStudentId).every((row) => row.status === "PRESENT")).toBe(true);
+
+    const teacherRow = await db
+      .selectFrom("teacherAttendance")
+      .select("status")
+      .where("sessionDate", "=", bulkDate)
+      .where("sessionTemplateId", "=", sessionId)
+      .executeTakeFirstOrThrow();
+    expect(teacherRow.status).toBe("PRESENT");
   });
 
   it("RULE 2/7 — a real mutation attempt is rejected server-side once the teacher is ABSENT, not just hidden in the UI", async () => {

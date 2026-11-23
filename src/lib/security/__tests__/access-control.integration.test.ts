@@ -11,6 +11,8 @@ vi.mock("@/lib/auth/config", () => ({
 }));
 
 const REAL_SESSION_USER_ID = "00000000-0000-0000-0000-0000000000f1";
+let createdTestUser = false;
+let createdTeacherProfile = false;
 
 const attendanceActions = await import("@/app/(app)/attendance/actions");
 const studentActions = await import("@/app/(app)/students/actions");
@@ -28,15 +30,31 @@ function fd(fields: Record<string, string>) {
 const NONEXISTENT_ID = "99999999-9999-4999-8999-999999999999"; // valid UUID shape, references nothing
 
 beforeAll(async () => {
-  await db
-    .insertInto("appUser")
-    .values({ id: REAL_SESSION_USER_ID, email: "test-security@example.invalid", passwordHash: "not-a-real-hash" })
-    .onConflict((oc) => oc.column("id").doNothing())
-    .execute();
+  const user = await db.selectFrom("appUser").select("id").where("id", "=", REAL_SESSION_USER_ID).executeTakeFirst();
+  if (!user) {
+    await db
+      .insertInto("appUser")
+      .values({ id: REAL_SESSION_USER_ID, email: "test-security@example.invalid", passwordHash: "not-a-real-hash" })
+      .execute();
+    createdTestUser = true;
+  }
+  const profile = await db
+    .selectFrom("teacherProfile")
+    .select("id")
+    .where("userId", "=", REAL_SESSION_USER_ID)
+    .executeTakeFirst();
+  if (!profile) {
+    await db
+      .insertInto("teacherProfile")
+      .values({ userId: REAL_SESSION_USER_ID, fullName: "TEST-SECURITY-TEACHER" })
+      .execute();
+    createdTeacherProfile = true;
+  }
 });
 
 afterAll(async () => {
-  await db.deleteFrom("appUser").where("id", "=", REAL_SESSION_USER_ID).execute();
+  if (createdTeacherProfile) await db.deleteFrom("teacherProfile").where("userId", "=", REAL_SESSION_USER_ID).execute();
+  if (createdTestUser) await db.deleteFrom("appUser").where("id", "=", REAL_SESSION_USER_ID).execute();
   await db.destroy();
 });
 
@@ -101,7 +119,17 @@ describe("access control — a valid session with attacker-supplied ids for OTHE
     mockAuth.mockResolvedValue({ user: { id: REAL_SESSION_USER_ID } });
   });
 
-  it("recordStudentAttendance with a nonexistent studentId fails via FK, not a crash or silent phantom row", async () => {
+  it("attendance actions reject an authenticated user without the owning teacher profile", async () => {
+    mockAuth.mockResolvedValue({ user: { id: "00000000-0000-0000-0000-0000000000f2" } });
+    try {
+      const result = await attendanceActions.markAllPresent("2027-01-01", NONEXISTENT_ID);
+      expect(result).toEqual({ ok: false, error: "غير مصرح بتسجيل الحضور" });
+    } finally {
+      mockAuth.mockResolvedValue({ user: { id: REAL_SESSION_USER_ID } });
+    }
+  });
+
+  it("recordStudentAttendance rejects a nonexistent student without a phantom row", async () => {
     // Needs a real, valid session+template so the failure is specifically
     // about the bogus studentId, not an unrelated rejection.
     const year = await db
@@ -126,7 +154,7 @@ describe("access control — a valid session with attacker-supplied ids for OTHE
     expect(result.ok).toBe(false);
 
     const phantomRows = await db.selectFrom("studentAttendance").select("id").where("studentId", "=", NONEXISTENT_ID).execute();
-    expect(phantomRows).toHaveLength(0); // no phantom row was created despite the FK failure being caught
+    expect(phantomRows).toHaveLength(0); // the server checks the active roster before attempting the write
 
     // cleanup
     await db.deleteFrom("teacherAttendance").where("sessionTemplateId", "=", session.id).execute();
