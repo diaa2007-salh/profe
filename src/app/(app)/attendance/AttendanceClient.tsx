@@ -55,8 +55,12 @@ export function AttendanceClient({
   const [pending, startTransition] = useTransition();
   const [query, setQuery] = useState("");
   const [optimisticStatuses, setOptimisticStatuses] = useState<Record<string, AttendanceStatus>>({});
+  const [optimisticArrivalTimes, setOptimisticArrivalTimes] = useState<Record<string, string>>({});
   const studentWrites = useRef(new Map<string, Promise<void>>());
   const requestSequences = useRef(new Map<string, number>());
+  const bulkInFlight = useRef(false);
+
+  const displayedDate = hasExplicitDate ? date : getLocalTodayISO();
 
   const activeSession = sessionTemplates.find((s) => s.id === activeSessionId)!;
   const recordsByStudent = useMemo(() => new Map(existingRecords.map((r) => [r.studentId, r])), [existingRecords]);
@@ -86,11 +90,9 @@ export function AttendanceClient({
   useEffect(() => {
     if (!hasExplicitDate) {
       const localToday = getLocalTodayISO();
-      if (localToday !== date) {
-        router.replace(`/attendance?session=${activeSessionId}&date=${localToday}`, { scroll: false });
-      }
+      router.replace(`/attendance?session=${activeSessionId}&date=${localToday}`, { scroll: false });
     }
-  }, [activeSessionId, date, hasExplicitDate, router]);
+  }, [activeSessionId, hasExplicitDate, router]);
 
   function setTeacher(status: "PRESENT" | "ABSENT") {
     const fd = new FormData();
@@ -116,6 +118,13 @@ export function AttendanceClient({
     const sequence = (requestSequences.current.get(studentId) ?? 0) + 1;
     requestSequences.current.set(studentId, sequence);
     setOptimisticStatuses((current) => ({ ...current, [studentId]: status }));
+    if (status !== "LATE") {
+      setOptimisticArrivalTimes((current) => {
+        const next = { ...current };
+        delete next[studentId];
+        return next;
+      });
+    }
 
     const fd = new FormData();
     fd.set("studentId", studentId);
@@ -127,6 +136,13 @@ export function AttendanceClient({
     const write = previousWrite.catch(() => undefined).then(async () => {
       const result = await recordStudentAttendance(fd);
       if (!result.ok) throw new Error(result.error);
+      if (
+        status === "LATE" &&
+        result.arrivalTime &&
+        requestSequences.current.get(studentId) === sequence
+      ) {
+        setOptimisticArrivalTimes((current) => ({ ...current, [studentId]: result.arrivalTime! }));
+      }
     });
     studentWrites.current.set(studentId, write);
 
@@ -136,8 +152,8 @@ export function AttendanceClient({
           if (requestSequences.current.get(studentId) === sequence) router.refresh();
         },
         (error: unknown) => {
-          toast.error(error instanceof Error ? error.message : "تعذّر حفظ حالة التلميذ");
           if (requestSequences.current.get(studentId) === sequence) {
+            toast.error(error instanceof Error ? error.message : "تعذّر حفظ حالة التلميذ");
             setOptimisticStatuses((current) => {
               const next = { ...current };
               delete next[studentId];
@@ -153,6 +169,8 @@ export function AttendanceClient({
   }
 
   function handleMarkAllPresent() {
+    if (bulkInFlight.current) return;
+    bulkInFlight.current = true;
     startTransition(async () => {
       try {
         const result = await markAllPresent(date, activeSessionId);
@@ -171,6 +189,8 @@ export function AttendanceClient({
         router.refresh();
       } catch {
         toast.error("تعذّر تأكيد الحضور وتحضير التلاميذ");
+      } finally {
+        bulkInFlight.current = false;
       }
     });
   }
@@ -179,14 +199,14 @@ export function AttendanceClient({
     <div className="space-y-5">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div className="flex flex-col gap-1">
-          <p className="text-sm text-muted-foreground">{formatFullDate(date)}</p>
+          <p className="text-sm text-muted-foreground">{formatFullDate(displayedDate)}</p>
           <h1 className="font-display text-2xl text-foreground">كشف الحضور</h1>
         </div>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
           <Input
             aria-label="تاريخ الحضور"
             type="date"
-            value={date}
+            value={displayedDate}
             onChange={(event) => {
               if (event.target.value) {
                 router.push(`/attendance?session=${activeSessionId}&date=${event.target.value}`);
@@ -261,7 +281,9 @@ export function AttendanceClient({
             {filteredStudents.map((student) => {
               const record = recordsByStudent.get(student.id);
               const status = pendingStatuses[student.id] ?? record?.status ?? "PRESENT";
-              const arrivalTime = record?.arrivalTime?.toString().slice(0, 5);
+              const arrivalTime =
+                optimisticArrivalTimes[student.id]?.slice(0, 5) ??
+                (status === "LATE" ? record?.arrivalTime?.toString().slice(0, 5) : undefined);
 
               return (
                 <Card key={student.id}>

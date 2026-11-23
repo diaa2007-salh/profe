@@ -9,7 +9,7 @@ import { canRecordStudentAttendance } from "@/lib/business/session-state";
 import { bulkAttendanceSchema, teacherAttendanceSchema, studentAttendanceSchema } from "@/lib/validation";
 
 export type ActionResult =
-  | { ok: true; preparedCount?: number; activeCount?: number }
+  | { ok: true; preparedCount?: number; activeCount?: number; arrivalTime?: string }
   | { ok: false; error: string };
 
 async function requireSession() {
@@ -134,7 +134,9 @@ export async function recordStudentAttendance(formData: FormData): Promise<Actio
 
   revalidatePath("/attendance");
   revalidatePath("/");
-  return { ok: true };
+  return status === "LATE" && arrivalTime
+    ? { ok: true, arrivalTime }
+    : { ok: true };
 }
 
 export async function markAllPresent(sessionDate: string, sessionTemplateId: string): Promise<ActionResult> {

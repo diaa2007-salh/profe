@@ -64,6 +64,8 @@ export const studentAttendanceSchema = z
     sessionDate: z.string().date(),
     sessionTemplateId: z.string().uuid(),
     status: z.enum(["PRESENT", "ABSENT", "LATE"]),
+    arrivalTime: z.string().optional(),
+    lateMinutes: z.number().int().nullable().optional(),
   });
 
 export const monthlyEvaluationSchema = z.object({
