@@ -7,6 +7,8 @@ import type { ColumnType } from "kysely";
 
 export type AttendanceStatus = "ABSENT" | "LATE" | "PRESENT";
 
+export type AttendancePeriod = 1 | 2;
+
 export type AppRole = "ADMIN" | "TEACHER";
 
 export type Generated<T> = T extends ColumnType<infer S, infer I, infer U>
@@ -115,6 +117,7 @@ export interface StudentAttendance {
   createdAt: Generated<Timestamp>;
   id: Generated<string>;
   lateMinutes: number | null;
+  period: Generated<AttendancePeriod>;
   sessionDate: string;
   sessionTemplateId: string;
   status: AttendanceStatus;
@@ -125,6 +128,7 @@ export interface StudentAttendance {
 export interface TeacherAttendance {
   createdAt: Generated<Timestamp>;
   id: Generated<string>;
+  period: Generated<AttendancePeriod>;
   sessionDate: string;
   sessionTemplateId: string;
   status: TeacherStatus;

@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+const attendancePeriodSchema = z.coerce.number().pipe(z.union([z.literal(1), z.literal(2)])).default(1);
+
 export const setupSchema = z.object({
   teacherName: z.string().trim().min(2, "الاسم قصير جدًا"),
   teacherPhone: z.string().trim().optional().or(z.literal("")),
@@ -51,12 +53,14 @@ export const cancellationSchema = z.object({
 export const teacherAttendanceSchema = z.object({
   sessionDate: z.string().date(),
   sessionTemplateId: z.string().uuid(),
+  period: attendancePeriodSchema,
   status: z.enum(["PRESENT", "ABSENT"]),
 });
 
 export const bulkAttendanceSchema = z.object({
   sessionDate: z.string().date(),
   sessionTemplateId: z.string().uuid(),
+  period: attendancePeriodSchema,
 });
 
 export const studentAttendanceSchema = z
@@ -64,5 +68,6 @@ export const studentAttendanceSchema = z
     studentId: z.string().uuid(),
     sessionDate: z.string().date(),
     sessionTemplateId: z.string().uuid(),
+    period: attendancePeriodSchema,
     status: z.enum(["PRESENT", "ABSENT", "LATE"]),
   });

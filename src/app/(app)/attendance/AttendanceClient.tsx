@@ -47,6 +47,7 @@ interface SessionTemplateInfo {
 
 export function AttendanceClient({
   date,
+  period,
   hasExplicitDate,
   sessionTemplates,
   activeSessionId,
@@ -56,6 +57,7 @@ export function AttendanceClient({
   existingRecords,
 }: {
   date: string;
+  period: 1 | 2;
   hasExplicitDate: boolean;
   sessionTemplates: SessionTemplateInfo[];
   activeSessionId: string;
@@ -124,14 +126,15 @@ export function AttendanceClient({
   useEffect(() => {
     if (!hasExplicitDate) {
       const localToday = getLocalTodayISO();
-      router.replace(`/attendance?session=${activeSessionId}&date=${localToday}`, { scroll: false });
+      router.replace(`/attendance?session=${activeSessionId}&date=${localToday}&period=${period}`, { scroll: false });
     }
-  }, [activeSessionId, hasExplicitDate, router]);
+  }, [activeSessionId, hasExplicitDate, period, router]);
 
   function setTeacher(status: "PRESENT" | "ABSENT") {
     const fd = new FormData();
     fd.set("sessionDate", displayedDate);
     fd.set("sessionTemplateId", activeSessionId);
+    fd.set("period", String(period));
     fd.set("status", status);
     startTransition(async () => {
       try {
@@ -165,6 +168,7 @@ export function AttendanceClient({
     fd.set("studentId", studentId);
     fd.set("sessionDate", displayedDate);
     fd.set("sessionTemplateId", activeSessionId);
+    fd.set("period", String(period));
     fd.set("status", status);
 
     const previousWrite = studentWrites.current.get(studentId) ?? Promise.resolve();
@@ -213,7 +217,7 @@ export function AttendanceClient({
     bulkInFlight.current = true;
     startTransition(async () => {
       try {
-        const result = await markAllPresent(displayedDate, activeSessionId);
+        const result = await markAllPresent(displayedDate, activeSessionId, period);
         if (!result.ok) {
           toast.error(result.error);
           return;
@@ -250,7 +254,7 @@ export function AttendanceClient({
             value={displayedDate}
             onChange={(event) => {
               if (event.target.value) {
-                router.push(`/attendance?session=${activeSessionId}&date=${event.target.value}`);
+                router.push(`/attendance?session=${activeSessionId}&date=${event.target.value}&period=${period}`);
               }
             }}
             className="h-11 rounded-xl sm:w-44"
@@ -265,7 +269,7 @@ export function AttendanceClient({
       </div>
 
       {sessionTemplates.length > 1 && (
-        <Tabs value={activeSessionId} onValueChange={(v) => router.push(`/attendance?session=${v}&date=${displayedDate}`)}>
+        <Tabs value={activeSessionId} onValueChange={(v) => router.push(`/attendance?session=${v}&date=${displayedDate}&period=${period}`)}>
           <TabsList className="h-auto rounded-xl bg-secondary/70 p-1">
             {sessionTemplates.map((s) => (
               <TabsTrigger key={s.id} value={s.id}>
@@ -275,6 +279,19 @@ export function AttendanceClient({
           </TabsList>
         </Tabs>
       )}
+      <div className="space-y-2">
+        <p className="text-sm font-medium text-foreground">فترة التسجيل</p>
+        <Tabs
+          value={String(period)}
+          onValueChange={(value) => router.push(`/attendance?session=${activeSessionId}&date=${displayedDate}&period=${value}`)}
+        >
+          <TabsList className="h-auto rounded-xl bg-secondary/70 p-1">
+            <TabsTrigger value="1" className="min-h-10 px-5">الحصة الأولى</TabsTrigger>
+            <TabsTrigger value="2" className="min-h-10 px-5">الحصة الثانية</TabsTrigger>
+          </TabsList>
+        </Tabs>
+        <p className="text-xs text-muted-foreground">الحالة المعروضة والحفظ الجماعي يخصان هذه الحصة فقط.</p>
+      </div>
       <p className="flex items-center gap-2 text-sm text-muted-foreground">
         <Clock3 className="h-4 w-4" />
         <Ltr>{activeSession.startTime} – {activeSession.endTime}</Ltr>

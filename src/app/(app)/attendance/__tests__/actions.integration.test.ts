@@ -209,6 +209,36 @@ describe("attendance integration — with an active academic year", () => {
     expect(row.arrivalTime?.toString().slice(0, 5)).not.toBe("25:99");
   });
 
+  it("records the second daily period independently from the first period", async () => {
+    const firstTeacherPeriod = await db.selectFrom("teacherAttendance")
+      .select("period")
+      .where("sessionDate", "=", TEST_DATE)
+      .where("sessionTemplateId", "=", sessionId)
+      .execute();
+    expect(firstTeacherPeriod.some((row) => row.period === 1)).toBe(true);
+
+    const teacherResult = await recordTeacherAttendance(
+      fd({ sessionDate: TEST_DATE, sessionTemplateId: sessionId, period: "2", status: "PRESENT" })
+    );
+    expect(teacherResult.ok).toBe(true);
+    const studentResult = await recordStudentAttendance(
+      fd({ studentId, sessionDate: TEST_DATE, sessionTemplateId: sessionId, period: "2", status: "LATE" })
+    );
+    expect(studentResult.ok).toBe(true);
+
+    const rows = await db.selectFrom("studentAttendance")
+      .select(["period", "status", "arrivalTime"])
+      .where("studentId", "=", studentId)
+      .where("sessionDate", "=", TEST_DATE)
+      .where("sessionTemplateId", "=", sessionId)
+      .orderBy("period")
+      .execute();
+    expect(rows).toHaveLength(2);
+    expect(rows[0].period).toBe(1);
+    expect(rows[1]).toMatchObject({ period: 2, status: "LATE" });
+    expect(rows[1].arrivalTime?.toString().slice(0, 5)).toMatch(/^(?:[01]\d|2[0-3]):[0-5]\d$/);
+  });
+
   it("Teacher PRESENT + Student ABSENT -> succeeds", async () => {
     const result = await recordStudentAttendance(
       fd({ studentId, sessionDate: TEST_DATE, sessionTemplateId: sessionId, status: "ABSENT" })

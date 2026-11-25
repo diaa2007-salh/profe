@@ -1,6 +1,7 @@
 import "server-only";
 import { db } from "@/lib/db/client";
 import { computeDailySessionState, type DailySessionState, type CancellationRange } from "@/lib/business/session-state";
+import type { AttendancePeriod } from "@/lib/db/types";
 
 export interface SessionStateContext {
   state: DailySessionState;
@@ -16,7 +17,8 @@ export interface SessionStateContext {
 export async function getSessionStateContext(
   date: string,
   sessionTemplateId: string,
-  teacherProfileId?: string
+  teacherProfileId?: string,
+  period: AttendancePeriod = 1
 ): Promise<SessionStateContext | null> {
   const sessionTemplate = await db
     .selectFrom("sessionTemplate")
@@ -34,7 +36,8 @@ export async function getSessionStateContext(
         .selectFrom("teacherAttendance")
         .select(["status"])
         .where("sessionDate", "=", date)
-        .where("sessionTemplateId", "=", sessionTemplateId);
+        .where("sessionTemplateId", "=", sessionTemplateId)
+        .where("period", "=", period);
       if (teacherProfileId) query = query.where("teacherProfileId", "=", teacherProfileId);
       return query.executeTakeFirst();
     })(),

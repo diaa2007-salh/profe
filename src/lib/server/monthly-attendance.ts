@@ -41,7 +41,7 @@ export async function getMonthlyAttendanceTable(
   const end = `${year}-${String(month).padStart(2, "0")}-${String(daysInMonth).padStart(2, "0")}`;
   const records = await db
     .selectFrom("studentAttendance")
-    .select(["studentId", "sessionDate", "status"])
+    .select(["studentId", "sessionDate", "period", "status"])
     .where("sessionDate", ">=", start)
     .where("sessionDate", "<=", end)
     .where("studentId", "in", students.map(({ id }) => id))

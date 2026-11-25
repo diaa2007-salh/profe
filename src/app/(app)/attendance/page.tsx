@@ -10,12 +10,14 @@ export const dynamic = "force-dynamic";
 export default async function AttendancePage({
   searchParams,
 }: {
-  searchParams: Promise<{ session?: string; date?: string }>;
+  searchParams: Promise<{ session?: string; date?: string; period?: string }>;
 }) {
   const params = await searchParams;
   const access = await getAccessContext();
   const explicitDate = z.string().date().safeParse(params.date);
   const date = explicitDate.success ? explicitDate.data : getTodayISO();
+  const parsedPeriod = z.coerce.number().pipe(z.union([z.literal(1), z.literal(2)])).safeParse(params.period);
+  const period = parsedPeriod.success ? parsedPeriod.data : 1;
 
   const sessionTemplates = await db
     .selectFrom("sessionTemplate")
@@ -30,14 +32,15 @@ export default async function AttendancePage({
     return <p className="text-sm text-muted-foreground">لا توجد حصص مُعرَّفة بعد. أضفها من الإعدادات.</p>;
   }
 
-  const ctx = await getSessionStateContext(date, activeSessionId, access.teacherProfileId ?? undefined);
+  const ctx = await getSessionStateContext(date, activeSessionId, access.teacherProfileId ?? undefined, period);
 
   let studentsQuery = db.selectFrom("student").selectAll().where("isActive", "=", true);
   let recordsQuery = db
     .selectFrom("studentAttendance")
     .selectAll()
     .where("sessionDate", "=", date)
-    .where("sessionTemplateId", "=", activeSessionId);
+    .where("sessionTemplateId", "=", activeSessionId)
+    .where("period", "=", period);
   if (!isAdmin(access)) {
     studentsQuery = studentsQuery.where("halaqaId", "in", access.halaqaIds);
     recordsQuery = recordsQuery.where("studentId", "in", db.selectFrom("student").select("id").where("halaqaId", "in", access.halaqaIds));
@@ -51,7 +54,8 @@ export default async function AttendancePage({
         .selectFrom("teacherAttendance")
         .selectAll()
         .where("sessionDate", "=", date)
-        .where("sessionTemplateId", "=", activeSessionId);
+        .where("sessionTemplateId", "=", activeSessionId)
+        .where("period", "=", period);
       if (access.role !== "ADMIN" && access.teacherProfileId) {
         teacherQuery = teacherQuery.where("teacherProfileId", "=", access.teacherProfileId);
       }
@@ -61,8 +65,9 @@ export default async function AttendancePage({
 
   return (
     <AttendanceClient
-      key={`${date}:${activeSessionId}`}
+      key={`${date}:${activeSessionId}:${period}`}
       date={date}
+      period={period}
       hasExplicitDate={explicitDate.success}
       sessionTemplates={sessionTemplates.map((s) => ({ id: s.id, name: s.name, startTime: s.startTime.toString().slice(0, 5), endTime: s.endTime.toString().slice(0, 5) }))}
       activeSessionId={activeSessionId}

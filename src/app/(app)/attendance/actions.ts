@@ -32,12 +32,12 @@ export async function recordTeacherAttendance(formData: FormData): Promise<Actio
 
   const parsed = teacherAttendanceSchema.safeParse(Object.fromEntries(formData));
   if (!parsed.success) return { ok: false, error: "بيانات غير صالحة" };
-  const { sessionDate, sessionTemplateId, status } = parsed.data;
+  const { sessionDate, sessionTemplateId, period, status } = parsed.data;
 
   // RULE 2/3/4: cancelled/holiday/out-of-year sessions can't have any
   // attendance recorded at all, teacher included. Re-derive from the DB —
   // never trust that the UI only offered this action when it was legal.
-  const ctx = await getSessionStateContext(sessionDate, sessionTemplateId, access.teacherProfileId);
+  const ctx = await getSessionStateContext(sessionDate, sessionTemplateId, access.teacherProfileId, period);
   if (!ctx) return { ok: false, error: "الحصة غير موجودة" };
   if (!["SCHEDULED", "TEACHER_PRESENT", "TEACHER_ABSENT"].includes(ctx.state)) {
     return { ok: false, error: "لا يمكن تسجيل الحضور — الحصة ملغاة أو في عطلة أو خارج السنة الدراسية" };
@@ -47,9 +47,9 @@ export async function recordTeacherAttendance(formData: FormData): Promise<Actio
     await db.transaction().execute(async (trx) => {
       await trx
         .insertInto("teacherAttendance")
-        .values({ sessionDate, sessionTemplateId, status, teacherProfileId: access.teacherProfileId! })
+        .values({ sessionDate, sessionTemplateId, period, status, teacherProfileId: access.teacherProfileId! })
         .onConflict((oc) =>
-          oc.columns(["teacherProfileId", "sessionDate", "sessionTemplateId"]).doUpdateSet({ status, updatedAt: new Date() })
+          oc.columns(["teacherProfileId", "sessionDate", "sessionTemplateId", "period"]).doUpdateSet({ status, updatedAt: new Date() })
         )
         .execute();
 
@@ -57,7 +57,8 @@ export async function recordTeacherAttendance(formData: FormData): Promise<Actio
         let deleteQuery = trx
           .deleteFrom("studentAttendance")
           .where("sessionDate", "=", sessionDate)
-          .where("sessionTemplateId", "=", sessionTemplateId);
+          .where("sessionTemplateId", "=", sessionTemplateId)
+          .where("period", "=", period);
         if (!isAdmin(access)) {
           deleteQuery = deleteQuery.where(
             "studentId",
@@ -87,7 +88,7 @@ export async function recordStudentAttendance(formData: FormData): Promise<Actio
   if (!parsed.success) {
     return { ok: false, error: parsed.error.issues[0]?.message ?? "بيانات غير صالحة" };
   }
-  const { studentId, sessionDate, sessionTemplateId, status } = parsed.data;
+  const { studentId, sessionDate, sessionTemplateId, period, status } = parsed.data;
   if (!(await canAccessStudent(access, studentId))) {
     return { ok: false, error: "التلميذ غير موجود أو غير متاح لهذا المستخدم" };
   }
@@ -103,7 +104,7 @@ export async function recordStudentAttendance(formData: FormData): Promise<Actio
   // RULE 1/7: server-side re-derivation, not a trusted client flag. This is
   // the exact check the spec says to also verify by attempting a direct
   // mutation while the teacher is ABSENT — see the integration test.
-  const ctx = await getSessionStateContext(sessionDate, sessionTemplateId, access.teacherProfileId ?? undefined);
+  const ctx = await getSessionStateContext(sessionDate, sessionTemplateId, access.teacherProfileId ?? undefined, period);
   if (!ctx || !canRecordStudentAttendance(ctx.state)) {
     return { ok: false, error: "لا يمكن تسجيل حضور الطلاب لهذه الحصة (المعلم غائب أو الحصة غير فعالة)" };
   }
@@ -117,12 +118,13 @@ export async function recordStudentAttendance(formData: FormData): Promise<Actio
         studentId,
         sessionDate,
         sessionTemplateId,
+        period,
         status,
         arrivalTime,
         lateMinutes: null,
       })
       .onConflict((oc) =>
-        oc.columns(["studentId", "sessionDate", "sessionTemplateId"]).doUpdateSet({
+        oc.columns(["studentId", "sessionDate", "sessionTemplateId", "period"]).doUpdateSet({
           status,
           arrivalTime,
           lateMinutes: null,
@@ -132,7 +134,10 @@ export async function recordStudentAttendance(formData: FormData): Promise<Actio
       .execute();
   } catch (err) {
     console.error("[attendance] student upsert failed", err);
-    return { ok: false, error: "تعذّر حفظ حضور الطالب" };
+    return {
+      ok: false,
+      error: status === "LATE" ? "تعذّر تسجيل التأخر ووقت الوصول" : "تعذّر حفظ حالة حضور التلميذ",
+    };
   }
 
   revalidatePath("/attendance");
@@ -142,14 +147,15 @@ export async function recordStudentAttendance(formData: FormData): Promise<Actio
     : { ok: true };
 }
 
-export async function markAllPresent(sessionDate: string, sessionTemplateId: string): Promise<ActionResult> {
+export async function markAllPresent(sessionDate: string, sessionTemplateId: string, period: 1 | 2 = 1): Promise<ActionResult> {
   const access = await getAttendanceAccess();
   if (!access?.teacherProfileId) return { ok: false, error: "غير مصرح بتسجيل الحضور" };
 
-  const parsed = bulkAttendanceSchema.safeParse({ sessionDate, sessionTemplateId });
+  const parsed = bulkAttendanceSchema.safeParse({ sessionDate, sessionTemplateId, period });
   if (!parsed.success) return { ok: false, error: "بيانات غير صالحة" };
   const { sessionDate: validDate, sessionTemplateId: validSessionId } = parsed.data;
-  const ctx = await getSessionStateContext(validDate, validSessionId, access.teacherProfileId);
+  const validPeriod = parsed.data.period;
+  const ctx = await getSessionStateContext(validDate, validSessionId, access.teacherProfileId, validPeriod);
   if (!ctx || !["SCHEDULED", "TEACHER_PRESENT", "TEACHER_ABSENT"].includes(ctx.state)) {
     return { ok: false, error: "لا يمكن تسجيل حضور الطلاب لهذه الحصة" };
   }
@@ -161,11 +167,12 @@ export async function markAllPresent(sessionDate: string, sessionTemplateId: str
         .values({
           sessionDate: validDate,
           sessionTemplateId: validSessionId,
+          period: validPeriod,
           status: "PRESENT",
           teacherProfileId: access.teacherProfileId!,
         })
         .onConflict((oc) =>
-          oc.columns(["teacherProfileId", "sessionDate", "sessionTemplateId"]).doUpdateSet({ status: "PRESENT", updatedAt: new Date() })
+          oc.columns(["teacherProfileId", "sessionDate", "sessionTemplateId", "period"]).doUpdateSet({ status: "PRESENT", updatedAt: new Date() })
         )
         .execute();
 
@@ -182,12 +189,13 @@ export async function markAllPresent(sessionDate: string, sessionTemplateId: str
             studentId,
             sessionDate: validDate,
             sessionTemplateId: validSessionId,
+            period: validPeriod,
             status: "PRESENT" as const,
             arrivalTime: null,
             lateMinutes: null,
           }))
         )
-        .onConflict((oc) => oc.columns(["studentId", "sessionDate", "sessionTemplateId"]).doNothing())
+        .onConflict((oc) => oc.columns(["studentId", "sessionDate", "sessionTemplateId", "period"]).doNothing())
         .returning("studentId")
         .execute();
 

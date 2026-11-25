@@ -161,38 +161,49 @@ export function MonthlyAttendanceClient({
             <table className="min-w-max border-separate border-spacing-0 text-center text-xs">
               <thead>
                 <tr className="bg-muted text-foreground">
-                  <th className="sticky right-0 top-0 z-30 min-w-48 border-b border-e border-border bg-muted px-3 py-3 text-right">اسم التلميذ</th>
+                  <th rowSpan={2} className="sticky right-0 top-0 z-30 min-w-48 border-b border-e border-border bg-muted px-3 py-3 text-right">اسم التلميذ</th>
                   {Array.from({ length: table.daysInMonth }, (_, index) => {
                     const day = index + 1;
                     const weekday = new Date(year, month - 1, day).getDay();
                     const isWeekend = weekday === 5 || weekday === 6;
                     const isToday = isCurrentMonth && todayParts[2] === day;
                     return (
-                    <th key={day} className={`sticky top-0 z-20 min-w-9 border-b border-border px-1 py-3 tabular-nums ${isToday ? "bg-emerald-100 text-emerald-900 dark:bg-emerald-950 dark:text-emerald-200" : isWeekend ? "bg-slate-100 text-slate-500 dark:bg-slate-800" : "bg-muted"}`}>
+                    <th key={day} colSpan={2} className={`sticky top-0 z-20 min-w-16 border-b border-border px-1 py-2 tabular-nums ${isToday ? "bg-emerald-100 text-emerald-900 dark:bg-emerald-950 dark:text-emerald-200" : isWeekend ? "bg-slate-100 text-slate-500 dark:bg-slate-800" : "bg-muted"}`}>
                       {day}
                     </th>
                     );
                   })}
-                  <th className="sticky top-0 z-20 min-w-16 border-b border-border bg-emerald-50 px-2 py-3 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">الحضور</th>
-                  <th className="sticky top-0 z-20 min-w-16 border-b border-border bg-rose-50 px-2 py-3 text-rose-800 dark:bg-rose-950 dark:text-rose-300">الغياب</th>
-                  <th className="sticky top-0 z-20 min-w-16 border-b border-border bg-amber-50 px-2 py-3 text-amber-800 dark:bg-amber-950 dark:text-amber-300">التأخر</th>
+                  <th rowSpan={2} className="sticky top-0 z-20 min-w-16 border-b border-border bg-emerald-50 px-2 py-3 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">الحضور</th>
+                  <th rowSpan={2} className="sticky top-0 z-20 min-w-16 border-b border-border bg-rose-50 px-2 py-3 text-rose-800 dark:bg-rose-950 dark:text-rose-300">الغياب</th>
+                  <th rowSpan={2} className="sticky top-0 z-20 min-w-16 border-b border-border bg-amber-50 px-2 py-3 text-amber-800 dark:bg-amber-950 dark:text-amber-300">التأخر</th>
+                </tr>
+                <tr className="bg-muted text-foreground">
+                  {Array.from({ length: table.daysInMonth }, (_, index) => (
+                    [1, 2].map((period) => (
+                      <th key={`${index + 1}-${period}`} className="sticky top-8 z-20 min-w-8 border-b border-border px-1 py-1 text-[10px] text-muted-foreground">
+                        ح{period}
+                      </th>
+                    ))
+                  ))}
                 </tr>
               </thead>
               <tbody>
                 {table.rows.map((student) => (
                   <tr key={student.id} className="group">
                     <th className="sticky right-0 z-10 border-b border-e border-border/70 bg-card px-3 py-2.5 text-right font-medium text-foreground group-hover:bg-muted/70">{student.fullName}</th>
-                    {student.days.map((status, index) => (
-                      <td key={index + 1} className={`border-b border-s border-border/60 px-1 py-2 ${status ? STATUS_STYLE[status] : "text-muted-foreground"} ${isCurrentMonth && todayParts[2] === index + 1 ? "ring-1 ring-inset ring-emerald-400/50" : ""}`}>
-                        <span
-                          title={`${String(index + 1).padStart(2, "0")}-${String(month).padStart(2, "0")}-${year} · ${status === "PRESENT" ? "حاضر" : status === "ABSENT" ? "غائب" : status === "LATE" ? "متأخر" : "غير مسجل"}`}
-                          aria-label={`اليوم ${index + 1}: ${status === "PRESENT" ? "حاضر" : status === "ABSENT" ? "غائب" : status === "LATE" ? "متأخر" : "غير مسجل"}`}
-                          className={`inline-flex h-6 min-w-6 items-center justify-center rounded-full font-semibold tabular-nums ${status ? "" : "text-muted-foreground"}`}
-                        >
-                          {status ? SYMBOL[status] : "-"}
-                        </span>
-                      </td>
-                    ))}
+                    {student.days.flatMap(({ period1, period2 }, index) =>
+                      [period1, period2].map((status, periodIndex) => (
+                        <td key={`${index + 1}-${periodIndex + 1}`} className={`border-b border-s border-border/60 px-1 py-2 ${status ? STATUS_STYLE[status] : "text-muted-foreground"} ${isCurrentMonth && todayParts[2] === index + 1 ? "ring-1 ring-inset ring-emerald-400/50" : ""}`}>
+                          <span
+                            title={`${String(index + 1).padStart(2, "0")}-${String(month).padStart(2, "0")}-${year} · الحصة ${periodIndex + 1} · ${status === "PRESENT" ? "حاضر" : status === "ABSENT" ? "غائب" : status === "LATE" ? "متأخر" : "غير مسجل"}`}
+                            aria-label={`اليوم ${index + 1} الحصة ${periodIndex + 1}: ${status === "PRESENT" ? "حاضر" : status === "ABSENT" ? "غائب" : status === "LATE" ? "متأخر" : "غير مسجل"}`}
+                            className={`inline-flex h-6 min-w-6 items-center justify-center rounded-full font-semibold tabular-nums ${status ? "" : "text-muted-foreground"}`}
+                          >
+                            {status ? SYMBOL[status] : "-"}
+                          </span>
+                        </td>
+                      ))
+                    )}
                     <td className="border-b border-border/60 bg-emerald-50/70 px-2 py-2 font-semibold tabular-nums text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300">{student.present}</td>
                     <td className="border-b border-border/60 bg-rose-50/70 px-2 py-2 font-semibold tabular-nums text-rose-800 dark:bg-rose-950/40 dark:text-rose-300">{student.absent}</td>
                     <td className="border-b border-border/60 bg-amber-50/70 px-2 py-2 font-semibold tabular-nums text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">{student.late}</td>
