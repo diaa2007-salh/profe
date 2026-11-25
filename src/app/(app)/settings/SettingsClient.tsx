@@ -61,9 +61,14 @@ export function SettingsClient({
 }) {
   return (
     <div className="space-y-5">
-      <h1 className="font-display text-2xl text-foreground">الإعدادات</h1>
+      <div className="rounded-2xl border border-border/80 bg-card p-5 shadow-sm">
+        <h1 className="font-display text-2xl font-semibold text-foreground">الإعدادات</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          إدارة الحلقات والحسابات والجداول والعطل
+        </p>
+      </div>
       <Tabs defaultValue="profile" dir="rtl">
-        <TabsList className="flex-wrap">
+        <TabsList className="h-auto max-w-full flex-nowrap justify-start gap-1 overflow-x-auto rounded-2xl bg-secondary/60 p-1">
           <TabsTrigger value="profile">الأستاذ</TabsTrigger>
           {isAdmin && (
             <>

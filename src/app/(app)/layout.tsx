@@ -1,6 +1,8 @@
 import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth/config";
+import { db } from "@/lib/db/client";
 import { getSetupState, getTeacherProfile } from "@/lib/server/app-state";
+import { getAccessContext } from "@/lib/server/access";
 import { AppShell } from "@/components/AppShell";
 
 // Every page here reads real-time DB state (today's attendance, live
@@ -21,7 +23,21 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   const session = await auth();
   if (!session?.user?.id) redirect("/login");
 
-  const teacher = await getTeacherProfile(session.user.id);
+  const [teacher, access] = await Promise.all([
+    getTeacherProfile(session.user.id),
+    getAccessContext(),
+  ]);
+  const halaqas = access.halaqaIds.length
+    ? await db.selectFrom("halaqa").select("name").where("id", "in", access.halaqaIds).orderBy("name").execute()
+    : [];
 
-  return <AppShell teacherName={teacher?.fullName}>{children}</AppShell>;
+  return (
+    <AppShell
+      teacherName={teacher?.fullName}
+      role={access.role}
+      halaqaNames={halaqas.map(({ name }) => name)}
+    >
+      {children}
+    </AppShell>
+  );
 }
