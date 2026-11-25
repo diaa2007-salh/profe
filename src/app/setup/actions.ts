@@ -35,11 +35,11 @@ export async function completeSetup(_prev: SetupFormState, formData: FormData): 
     await db.transaction().execute(async (trx) => {
       const user = await trx
         .insertInto("appUser")
-        .values({ email: data.email.toLowerCase().trim(), passwordHash })
+        .values({ email: data.email.toLowerCase().trim(), passwordHash, role: "ADMIN" })
         .returning(["id"])
         .executeTakeFirstOrThrow();
 
-      await trx
+      const teacher = await trx
         .insertInto("teacherProfile")
         .values({
           userId: user.id,
@@ -47,6 +47,18 @@ export async function completeSetup(_prev: SetupFormState, formData: FormData): 
           phone: data.teacherPhone || null,
           halaqaName: data.halaqaName || null,
         })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+
+      const halaqa = await trx
+        .insertInto("halaqa")
+        .values({ name: data.halaqaName?.trim() || "الحلقة الافتراضية" })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+
+      await trx
+        .insertInto("teacherHalaqa")
+        .values({ teacherProfileId: teacher.id, halaqaId: halaqa.id })
         .execute();
 
       await trx

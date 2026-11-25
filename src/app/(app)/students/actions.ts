@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { auth } from "@/lib/auth/config";
 import { db } from "@/lib/db/client";
 import { studentSchema } from "@/lib/validation";
+import { canAccessStudent, getAccessContext } from "@/lib/server/access";
 
 async function requireSession() {
   const session = await auth();
@@ -15,6 +16,7 @@ export type ActionResult = { ok: true } | { ok: false; error: string };
 
 export async function upsertStudent(formData: FormData): Promise<ActionResult> {
   await requireSession();
+  const access = await getAccessContext();
 
   const raw = Object.fromEntries(formData);
   const parsed = studentSchema.safeParse(raw);
@@ -22,6 +24,15 @@ export async function upsertStudent(formData: FormData): Promise<ActionResult> {
     return { ok: false, error: parsed.error.issues[0]?.message ?? "بيانات غير صالحة" };
   }
   const d = parsed.data;
+  const selectedHalaqaId = d.halaqaId ?? (access.role === "ADMIN" ? undefined : access.halaqaIds[0]);
+  if (!selectedHalaqaId || (access.role !== "ADMIN" && !access.halaqaIds.includes(selectedHalaqaId))) {
+    return { ok: false, error: "الحلقة غير متاحة لهذا المستخدم" };
+  }
+  const halaqa = await db.selectFrom("halaqa").select("id").where("id", "=", selectedHalaqaId).executeTakeFirst();
+  if (!halaqa) return { ok: false, error: "الحلقة غير موجودة" };
+  if (d.id && !(await canAccessStudent(access, d.id))) {
+    return { ok: false, error: "غير مصرح بتعديل هذا التلميذ" };
+  }
 
   try {
     if (d.id) {
@@ -34,6 +45,7 @@ export async function upsertStudent(formData: FormData): Promise<ActionResult> {
           address: d.address || null,
           guardianName: d.guardianName || null,
           guardianPhone: d.guardianPhone || null,
+          halaqaId: selectedHalaqaId,
           updatedAt: new Date(),
         })
         .where("id", "=", d.id)
@@ -48,6 +60,7 @@ export async function upsertStudent(formData: FormData): Promise<ActionResult> {
           address: d.address || null,
           guardianName: d.guardianName || null,
           guardianPhone: d.guardianPhone || null,
+          halaqaId: selectedHalaqaId,
         })
         .execute();
     }
@@ -62,6 +75,8 @@ export async function upsertStudent(formData: FormData): Promise<ActionResult> {
 
 export async function archiveStudent(studentId: string): Promise<ActionResult> {
   await requireSession();
+  const access = await getAccessContext();
+  if (!(await canAccessStudent(access, studentId))) return { ok: false, error: "غير مصرح بتعديل هذا التلميذ" };
   await db
     .updateTable("student")
     .set({ isActive: false, archivedAt: new Date(), updatedAt: new Date() })
@@ -73,6 +88,8 @@ export async function archiveStudent(studentId: string): Promise<ActionResult> {
 
 export async function restoreStudent(studentId: string): Promise<ActionResult> {
   await requireSession();
+  const access = await getAccessContext();
+  if (!(await canAccessStudent(access, studentId))) return { ok: false, error: "غير مصرح بتعديل هذا التلميذ" };
   await db
     .updateTable("student")
     .set({ isActive: true, archivedAt: null, updatedAt: new Date() })

@@ -13,8 +13,10 @@ const { recordTeacherAttendance, recordStudentAttendance, markAllPresent } = awa
 const TEST_DATE = "2026-11-10"; // a Tuesday, safely inside the fixture academic year below
 const TEST_USER_ID = "00000000-0000-0000-0000-000000000001";
 let sessionId: string;
+let teacherProfileId: string;
 let studentId: string;
 let lateStudentId: string;
+let halaqaId: string;
 let createdTestUser = false;
 let createdTestProfile = false;
 
@@ -29,22 +31,33 @@ beforeAll(async () => {
   if (!existingUser) {
     await db
       .insertInto("appUser")
-      .values({ id: TEST_USER_ID, email: "test-attendance@example.invalid", passwordHash: "not-a-real-hash" })
+      .values({ id: TEST_USER_ID, email: "test-attendance@example.invalid", passwordHash: "not-a-real-hash", role: "ADMIN" })
       .execute();
     createdTestUser = true;
   }
-  const existingProfile = await db
+  await db.updateTable("appUser").set({ role: "ADMIN" }).where("id", "=", TEST_USER_ID).execute();
+  let existingProfile = await db
     .selectFrom("teacherProfile")
     .select("id")
     .where("userId", "=", TEST_USER_ID)
     .executeTakeFirst();
   if (!existingProfile) {
-    await db
+    existingProfile = await db
       .insertInto("teacherProfile")
       .values({ userId: TEST_USER_ID, fullName: "TEST-TEACHER-ATTENDANCE" })
-      .execute();
+      .returning("id")
+      .executeTakeFirstOrThrow();
     createdTestProfile = true;
   }
+  teacherProfileId = existingProfile.id;
+
+  const halaqa = await db
+    .insertInto("halaqa")
+    .values({ name: "TEST-ATTENDANCE-HALAQA" })
+    .returning("id")
+    .executeTakeFirstOrThrow();
+  halaqaId = halaqa.id;
+  await db.insertInto("teacherHalaqa").values({ teacherProfileId, halaqaId }).execute();
 
   // Real rows in the real database — cleaned up in afterAll, not rolled
   // back, since the code under test uses the shared `db` singleton rather
@@ -64,13 +77,13 @@ beforeAll(async () => {
 
   const student = await db
     .insertInto("student")
-    .values({ fullName: "TEST-STUDENT-ATTENDANCE" })
+    .values({ fullName: "TEST-STUDENT-ATTENDANCE", halaqaId })
     .returning(["id"])
     .executeTakeFirstOrThrow();
   studentId = student.id;
   const lateStudent = await db
     .insertInto("student")
-    .values({ fullName: "TEST-STUDENT-LATE-ATTENDANCE" })
+    .values({ fullName: "TEST-STUDENT-LATE-ATTENDANCE", halaqaId })
     .returning(["id"])
     .executeTakeFirstOrThrow();
   lateStudentId = lateStudent.id;
@@ -83,6 +96,8 @@ afterAll(async () => {
   await db.deleteFrom("holiday").where("name", "=", "TEST-HOLIDAY").execute();
   await db.deleteFrom("student").where("id", "=", studentId).execute();
   await db.deleteFrom("student").where("id", "=", lateStudentId).execute();
+  await db.deleteFrom("teacherHalaqa").where("teacherProfileId", "=", teacherProfileId).where("halaqaId", "=", halaqaId).execute();
+  await db.deleteFrom("halaqa").where("id", "=", halaqaId).execute();
   await db.deleteFrom("sessionTemplate").where("id", "=", sessionId).execute();
   await db.deleteFrom("academicYear").where("label", "=", "TEST-YEAR").execute();
   if (createdTestProfile) await db.deleteFrom("teacherProfile").where("userId", "=", TEST_USER_ID).execute();
@@ -237,7 +252,7 @@ describe("attendance integration — with an active academic year", () => {
     await db.deleteFrom("studentAttendance").where("sessionDate", "=", bulkDate).where("sessionTemplateId", "=", sessionId).execute();
     await db
       .insertInto("teacherAttendance")
-      .values({ sessionDate: bulkDate, sessionTemplateId: sessionId, status: "ABSENT" })
+      .values({ sessionDate: bulkDate, sessionTemplateId: sessionId, status: "ABSENT", teacherProfileId })
       .execute();
     await db
       .insertInto("studentAttendance")
@@ -257,10 +272,20 @@ describe("attendance integration — with an active academic year", () => {
     const activeStudentIds = await db.selectFrom("student").select("id").where("isActive", "=", true).execute();
 
     const first = await markAllPresent(bulkDate, sessionId);
-    expect(first).toEqual({ ok: true, preparedCount: activeStudentIds.length - 2, activeCount: activeStudentIds.length });
+    expect(first).toEqual({
+      ok: true,
+      preparedCount: activeStudentIds.length - 2,
+      activeCount: activeStudentIds.length,
+      preservedCount: 2,
+    });
 
     const second = await markAllPresent(bulkDate, sessionId);
-    expect(second).toEqual({ ok: true, preparedCount: 0, activeCount: activeStudentIds.length });
+    expect(second).toEqual({
+      ok: true,
+      preparedCount: 0,
+      activeCount: activeStudentIds.length,
+      preservedCount: activeStudentIds.length,
+    });
 
     const attendanceRows = await db
       .selectFrom("studentAttendance")

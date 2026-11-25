@@ -4,11 +4,19 @@ import { revalidatePath } from "next/cache";
 import { auth } from "@/lib/auth/config";
 import { db } from "@/lib/db/client";
 import { holidaySchema, cancellationSchema } from "@/lib/validation";
+import { getAccessContext, isAdmin } from "@/lib/server/access";
+import { hashPassword } from "@/lib/auth/password";
 import { z } from "zod";
 
 async function requireSession() {
   const session = await auth();
   if (!session?.user?.id) throw new Error("UNAUTHORIZED");
+  return session;
+}
+
+async function requireAdmin() {
+  const session = await requireSession();
+  if (!isAdmin(await getAccessContext())) throw new Error("FORBIDDEN");
   return session;
 }
 
@@ -30,18 +38,19 @@ function revalidateEverything() {
 const teacherProfileSchema = z.object({
   fullName: z.string().trim().min(2),
   phone: z.string().trim().optional().or(z.literal("")),
-  halaqaName: z.string().trim().optional().or(z.literal("")),
 });
 
 export async function updateTeacherProfile(formData: FormData): Promise<ActionResult> {
   const session = await requireSession();
+  const access = await getAccessContext();
+  if (!access.teacherProfileId) return { ok: false, error: "ملف الأستاذ غير موجود" };
   const parsed = teacherProfileSchema.safeParse(Object.fromEntries(formData));
   if (!parsed.success) return { ok: false, error: "بيانات غير صالحة" };
   const d = parsed.data;
 
   await db
     .updateTable("teacherProfile")
-    .set({ fullName: d.fullName, phone: d.phone || null, halaqaName: d.halaqaName || null, updatedAt: new Date() })
+    .set({ fullName: d.fullName, phone: d.phone || null, updatedAt: new Date() })
     .where("userId", "=", session.user!.id!)
     .execute();
 
@@ -59,7 +68,7 @@ const academicYearSchema = z.object({
 });
 
 export async function upsertAcademicYear(formData: FormData): Promise<ActionResult> {
-  await requireSession();
+  await requireAdmin();
   const parsed = academicYearSchema.safeParse(Object.fromEntries(formData));
   if (!parsed.success) return { ok: false, error: "بيانات غير صالحة" };
   const d = parsed.data;
@@ -80,7 +89,7 @@ export async function upsertAcademicYear(formData: FormData): Promise<ActionResu
 }
 
 export async function setActiveAcademicYear(id: string): Promise<ActionResult> {
-  await requireSession();
+  await requireAdmin();
 
   const target = await db.selectFrom("academicYear").select("id").where("id", "=", id).executeTakeFirst();
   if (!target) {
@@ -113,7 +122,7 @@ const sessionTemplateSchema = z.object({
 });
 
 export async function upsertSessionTemplate(formData: FormData): Promise<ActionResult> {
-  await requireSession();
+  await requireAdmin();
   const parsed = sessionTemplateSchema.safeParse(Object.fromEntries(formData));
   if (!parsed.success) return { ok: false, error: "بيانات غير صالحة" };
   const d = parsed.data;
@@ -141,7 +150,7 @@ export async function upsertSessionTemplate(formData: FormData): Promise<ActionR
 // ---------- Holidays ----------
 
 export async function upsertHoliday(formData: FormData): Promise<ActionResult> {
-  await requireSession();
+  await requireAdmin();
   const parsed = holidaySchema.safeParse(Object.fromEntries(formData));
   if (!parsed.success) return { ok: false, error: "بيانات غير صالحة" };
   const d = parsed.data;
@@ -162,7 +171,7 @@ export async function upsertHoliday(formData: FormData): Promise<ActionResult> {
 }
 
 export async function deleteHoliday(id: string): Promise<ActionResult> {
-  await requireSession();
+  await requireAdmin();
   await db.deleteFrom("holiday").where("id", "=", id).execute();
   revalidateEverything();
   return { ok: true };
@@ -171,7 +180,7 @@ export async function deleteHoliday(id: string): Promise<ActionResult> {
 // ---------- Session cancellations ----------
 
 export async function upsertCancellation(formData: FormData): Promise<ActionResult> {
-  await requireSession();
+  await requireAdmin();
   const raw = Object.fromEntries(formData);
   // FormData turns an intentionally-empty "all sessions" selection into "",
   // which Zod's .nullable() doesn't accept directly — normalize first.
@@ -211,40 +220,79 @@ export async function upsertCancellation(formData: FormData): Promise<ActionResu
 }
 
 export async function deleteCancellation(id: string): Promise<ActionResult> {
-  await requireSession();
+  await requireAdmin();
   await db.deleteFrom("sessionCancellation").where("id", "=", id).execute();
   revalidateEverything();
   return { ok: true };
 }
 
-// ---------- Mushaf edition ----------
+const halaqaNameSchema = z.object({ name: z.string().trim().min(2).max(100) });
 
-const mushafEditionSchema = z.object({
-  name: z.string().trim().min(1),
-  publisher: z.string().trim().optional().or(z.literal("")),
-  edition: z.string().trim().optional().or(z.literal("")),
-  description: z.string().trim().optional().or(z.literal("")),
+export async function createHalaqa(formData: FormData): Promise<ActionResult> {
+  await requireAdmin();
+  const parsed = halaqaNameSchema.safeParse(Object.fromEntries(formData));
+  if (!parsed.success) return { ok: false, error: "اسم الحلقة غير صالح" };
+  try {
+    await db.insertInto("halaqa").values({ name: parsed.data.name }).execute();
+  } catch (err) {
+    console.error("[settings] create halaqa failed", err);
+    return { ok: false, error: "تعذّر إنشاء الحلقة" };
+  }
+  revalidateEverything();
+  return { ok: true };
+}
+
+const teacherAccountSchema = z.object({
+  fullName: z.string().trim().min(2),
+  email: z.string().trim().email(),
+  password: z.string().min(8),
+  halaqaId: z.string().uuid(),
+  role: z.enum(["ADMIN", "TEACHER"]),
 });
 
-export async function createMushafEdition(formData: FormData): Promise<ActionResult> {
-  await requireSession();
-  const parsed = mushafEditionSchema.safeParse(Object.fromEntries(formData));
+export async function createTeacherAccount(formData: FormData): Promise<ActionResult> {
+  await requireAdmin();
+  const parsed = teacherAccountSchema.safeParse(Object.fromEntries(formData));
+  if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? "بيانات غير صالحة" };
+  const data = parsed.data;
+  const halaqa = await db.selectFrom("halaqa").select(["id", "name"]).where("id", "=", data.halaqaId).executeTakeFirst();
+  if (!halaqa) return { ok: false, error: "الحلقة غير موجودة" };
+
+  try {
+    const passwordHash = await hashPassword(data.password);
+    await db.transaction().execute(async (trx) => {
+      const user = await trx
+        .insertInto("appUser")
+        .values({ email: data.email.toLowerCase(), passwordHash, role: data.role })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      const profile = await trx
+        .insertInto("teacherProfile")
+        .values({ userId: user.id, fullName: data.fullName, halaqaName: halaqa.name })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      await trx.insertInto("teacherHalaqa").values({ teacherProfileId: profile.id, halaqaId: halaqa.id }).execute();
+    });
+  } catch (err) {
+    console.error("[settings] create teacher failed", err);
+    return { ok: false, error: "تعذّر إنشاء حساب المعلم؛ تحقق من عدم تكرار البريد الإلكتروني" };
+  }
+  revalidateEverything();
+  return { ok: true };
+}
+
+export async function assignTeacherToHalaqa(userId: string, halaqaId: string): Promise<ActionResult> {
+  await requireAdmin();
+  const parsed = z.object({ userId: z.string().uuid(), halaqaId: z.string().uuid() }).safeParse({ userId, halaqaId });
   if (!parsed.success) return { ok: false, error: "بيانات غير صالحة" };
-  const d = parsed.data;
-
-  const existing = await db.selectFrom("mushafEdition").select("id").executeTakeFirst();
+  const profile = await db.selectFrom("teacherProfile").select("id").where("userId", "=", userId).executeTakeFirst();
+  const halaqa = await db.selectFrom("halaqa").select("id").where("id", "=", halaqaId).executeTakeFirst();
+  if (!profile || !halaqa) return { ok: false, error: "المعلم أو الحلقة غير موجود" };
   await db
-    .insertInto("mushafEdition")
-    .values({
-      name: d.name,
-      publisher: d.publisher || null,
-      edition: d.edition || null,
-      description: d.description || null,
-      isDefault: !existing,
-      isVerified: false, // never true from a form submission — only a documented, checked data import can set this
-    })
+    .insertInto("teacherHalaqa")
+    .values({ teacherProfileId: profile.id, halaqaId })
+    .onConflict((oc) => oc.columns(["teacherProfileId", "halaqaId"]).doNothing())
     .execute();
-
   revalidateEverything();
   return { ok: true };
 }

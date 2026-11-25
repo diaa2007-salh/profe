@@ -11,7 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
-import { Plus, Star, Trash2, Pencil, Download, Upload, TriangleAlert } from "lucide-react";
+import { Plus, Trash2, Pencil, Download, Upload, TriangleAlert } from "lucide-react";
 import { Ltr } from "@/components/Ltr";
 import { formatShortDate } from "@/lib/domain";
 import {
@@ -23,11 +23,13 @@ import {
   deleteHoliday,
   upsertCancellation,
   deleteCancellation,
-  createMushafEdition,
+  createHalaqa,
+  createTeacherAccount,
+  assignTeacherToHalaqa,
 } from "./actions";
 import { exportBackup, restoreBackup } from "./backup/actions";
 import type { Selectable } from "kysely";
-import type { TeacherProfile, AcademicYear, Holiday, MushafEdition } from "@/lib/db/types";
+import type { TeacherProfile, AcademicYear, Holiday } from "@/lib/db/types";
 
 interface CancellationRow {
   id: string;
@@ -39,19 +41,23 @@ interface CancellationRow {
 }
 
 export function SettingsClient({
+  isAdmin,
   teacher,
   academicYears,
   sessionTemplates,
   holidays,
   cancellations,
-  mushafEditions,
+  halaqas,
+  teachers,
 }: {
+  isAdmin: boolean;
   teacher: Selectable<TeacherProfile> | undefined;
   academicYears: Selectable<AcademicYear>[];
   sessionTemplates: { id: string; name: string; startTime: string; endTime: string }[];
   holidays: Selectable<Holiday>[];
   cancellations: CancellationRow[];
-  mushafEditions: Selectable<MushafEdition>[];
+  halaqas: { id: string; name: string }[];
+  teachers: { userId: string; fullName: string; email: string; halaqaId: string | null; halaqaName: string | null }[];
 }) {
   return (
     <div className="space-y-5">
@@ -59,17 +65,26 @@ export function SettingsClient({
       <Tabs defaultValue="profile" dir="rtl">
         <TabsList className="flex-wrap">
           <TabsTrigger value="profile">الأستاذ</TabsTrigger>
-          <TabsTrigger value="year">السنة الدراسية</TabsTrigger>
-          <TabsTrigger value="sessions">الحصص</TabsTrigger>
-          <TabsTrigger value="holidays">العطل</TabsTrigger>
-          <TabsTrigger value="cancellations">فترات الإلغاء</TabsTrigger>
-          <TabsTrigger value="mushaf">نسخة المصحف</TabsTrigger>
-          <TabsTrigger value="backup">النسخ الاحتياطي</TabsTrigger>
+          {isAdmin && (
+            <>
+              <TabsTrigger value="groups">الحلقات والمعلمون</TabsTrigger>
+              <TabsTrigger value="year">السنة الدراسية</TabsTrigger>
+              <TabsTrigger value="sessions">الحصص</TabsTrigger>
+              <TabsTrigger value="holidays">العطل</TabsTrigger>
+              <TabsTrigger value="cancellations">فترات الإلغاء</TabsTrigger>
+              <TabsTrigger value="backup">النسخ الاحتياطي</TabsTrigger>
+            </>
+          )}
         </TabsList>
 
         <TabsContent value="profile" className="mt-4">
           <ProfileSection teacher={teacher} />
         </TabsContent>
+        {isAdmin && (
+          <TabsContent value="groups" className="mt-4">
+            <HalaqasSection halaqas={halaqas} teachers={teachers} />
+          </TabsContent>
+        )}
         <TabsContent value="year" className="mt-4">
           <AcademicYearSection years={academicYears} />
         </TabsContent>
@@ -82,9 +97,6 @@ export function SettingsClient({
         <TabsContent value="cancellations" className="mt-4">
           <CancellationsSection cancellations={cancellations} sessionTemplates={sessionTemplates} />
         </TabsContent>
-        <TabsContent value="mushaf" className="mt-4">
-          <MushafSection editions={mushafEditions} />
-        </TabsContent>
         <TabsContent value="backup" className="mt-4">
           <BackupSection />
         </TabsContent>
@@ -93,15 +105,134 @@ export function SettingsClient({
   );
 }
 
+function HalaqasSection({
+  halaqas,
+  teachers,
+}: {
+  halaqas: { id: string; name: string }[];
+  teachers: { userId: string; fullName: string; email: string; halaqaId: string | null; halaqaName: string | null }[];
+}) {
+  const [pending, startTransition] = useTransition();
+  const [groupName, setGroupName] = useState("");
+  const [teacherForm, setTeacherForm] = useState({
+    fullName: "",
+    email: "",
+    password: "",
+    halaqaId: halaqas[0]?.id ?? "",
+    role: "TEACHER",
+  });
+  const [assignments, setAssignments] = useState<Record<string, string>>({});
+
+  function submitGroup() {
+    const formData = new FormData();
+    formData.set("name", groupName);
+    startTransition(async () => {
+      const result = await createHalaqa(formData);
+      if (result.ok) {
+        toast.success("تم إنشاء الحلقة");
+        setGroupName("");
+      } else toast.error(result.error);
+    });
+  }
+
+  function submitTeacher() {
+    const formData = new FormData();
+    Object.entries(teacherForm).forEach(([key, value]) => formData.set(key, value));
+    startTransition(async () => {
+      const result = await createTeacherAccount(formData);
+      if (result.ok) {
+        toast.success("تم إنشاء حساب المعلم");
+        setTeacherForm({ fullName: "", email: "", password: "", halaqaId: halaqas[0]?.id ?? "", role: "TEACHER" });
+      } else toast.error(result.error);
+    });
+  }
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardContent className="space-y-3 py-5">
+          <h2 className="text-sm font-medium text-foreground">إضافة حلقة</h2>
+          <div className="flex gap-2">
+            <Input value={groupName} onChange={(event) => setGroupName(event.target.value)} placeholder="اسم الحلقة" />
+            <Button onClick={submitGroup} disabled={pending || groupName.trim().length < 2}>إضافة</Button>
+          </div>
+          <ul className="space-y-1 text-sm text-muted-foreground">
+            {halaqas.map((halaqa) => <li key={halaqa.id}>{halaqa.name}</li>)}
+          </ul>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="space-y-3 py-5">
+          <h2 className="text-sm font-medium text-foreground">إنشاء حساب معلم</h2>
+          <Input value={teacherForm.fullName} onChange={(event) => setTeacherForm({ ...teacherForm, fullName: event.target.value })} placeholder="اسم المعلم" />
+          <Input type="email" dir="ltr" value={teacherForm.email} onChange={(event) => setTeacherForm({ ...teacherForm, email: event.target.value })} placeholder="البريد الإلكتروني" />
+          <Input type="password" dir="ltr" value={teacherForm.password} onChange={(event) => setTeacherForm({ ...teacherForm, password: event.target.value })} placeholder="كلمة المرور (8 أحرف على الأقل)" />
+          <select
+            value={teacherForm.role}
+            onChange={(event) => setTeacherForm({ ...teacherForm, role: event.target.value })}
+            className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground"
+          >
+            <option value="TEACHER">معلم</option>
+            <option value="ADMIN">مسؤول</option>
+          </select>
+          <select
+            value={teacherForm.halaqaId}
+            onChange={(event) => setTeacherForm({ ...teacherForm, halaqaId: event.target.value })}
+            className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground"
+          >
+            {halaqas.map((halaqa) => <option key={halaqa.id} value={halaqa.id}>{halaqa.name}</option>)}
+          </select>
+          <Button onClick={submitTeacher} disabled={pending || !teacherForm.halaqaId || teacherForm.fullName.trim().length < 2 || teacherForm.password.length < 8}>
+            إنشاء الحساب
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="space-y-3 py-5">
+          <h2 className="text-sm font-medium text-foreground">المعلمون وتوزيع الحلقات</h2>
+          {teachers.map((teacher) => (
+            <div key={`${teacher.userId}:${teacher.halaqaId ?? "none"}`} className="flex flex-wrap items-center justify-between gap-2 border-b border-border py-2 text-sm">
+              <span>{teacher.fullName} <span className="text-muted-foreground">({teacher.email})</span></span>
+              <span className="text-xs text-muted-foreground">{teacher.halaqaName ?? "غير معيّن"}</span>
+              <div className="flex gap-2">
+                <select
+                  value={assignments[teacher.userId] ?? halaqas[0]?.id ?? ""}
+                  onChange={(event) => setAssignments({ ...assignments, [teacher.userId]: event.target.value })}
+                  className="h-9 rounded-md border border-input bg-background px-2 text-xs text-foreground"
+                >
+                  {halaqas.map((halaqa) => <option key={halaqa.id} value={halaqa.id}>{halaqa.name}</option>)}
+                </select>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={pending || !halaqas.length}
+                  onClick={() => startTransition(async () => {
+                    const result = await assignTeacherToHalaqa(teacher.userId, assignments[teacher.userId] ?? halaqas[0]?.id ?? "");
+                    if (result.ok) toast.success("تم ربط المعلم بالحلقة");
+                    else toast.error(result.error);
+                  })}
+                >
+                  ربط
+                </Button>
+              </div>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 function ProfileSection({ teacher }: { teacher: Selectable<TeacherProfile> | undefined }) {
   const [pending, startTransition] = useTransition();
-  const [form, setForm] = useState({ fullName: teacher?.fullName ?? "", phone: teacher?.phone ?? "", halaqaName: teacher?.halaqaName ?? "" });
+  const [form, setForm] = useState({ fullName: teacher?.fullName ?? "", phone: teacher?.phone ?? "" });
 
   function handleSave() {
     const fd = new FormData();
     fd.set("fullName", form.fullName);
     if (form.phone) fd.set("phone", form.phone);
-    if (form.halaqaName) fd.set("halaqaName", form.halaqaName);
     startTransition(async () => {
       const result = await updateTeacherProfile(fd);
       if (result.ok) toast.success("تم حفظ البيانات");
@@ -119,10 +250,6 @@ function ProfileSection({ teacher }: { teacher: Selectable<TeacherProfile> | und
         <div className="space-y-1.5">
           <Label>رقم الهاتف</Label>
           <Input dir="ltr" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
-        </div>
-        <div className="space-y-1.5">
-          <Label>اسم الحلقة أو المسجد</Label>
-          <Input value={form.halaqaName} onChange={(e) => setForm({ ...form, halaqaName: e.target.value })} />
         </div>
         <Button onClick={handleSave} disabled={pending}>
           حفظ
@@ -563,7 +690,7 @@ function BackupSection() {
         <CardContent className="space-y-3 py-5">
           <h2 className="text-sm font-medium text-foreground">تصدير نسخة احتياطية</h2>
           <p className="text-xs text-muted-foreground">
-            ملف JSON يحتوي بيانات التلاميذ والحضور والتسميع والتقييمات والتقويم الدراسي. لا يحتوي كلمات مرور أو أسرار الحساب.
+            ملف JSON يحتوي بيانات التلاميذ والحضور والحلقات والتقويم الدراسي. لا يحتوي كلمات مرور أو أسرار الحساب.
           </p>
           <Button onClick={handleExport} disabled={pending} className="gap-1.5">
             <Download className="h-4 w-4" />
@@ -599,7 +726,7 @@ function BackupSection() {
             <DialogTitle className="font-display font-normal text-destructive">تأكيد الاستعادة</DialogTitle>
           </DialogHeader>
           <p className="text-sm text-foreground">
-            سيتم حذف جميع بيانات التلاميذ والحضور والتسميع الحالية واستبدالها بمحتوى هذا الملف. هذا الإجراء لا يمكن التراجع عنه. هل أنت متأكد؟
+            سيتم حذف جميع بيانات التلاميذ والحضور والحلقات الحالية واستبدالها بمحتوى هذا الملف. هذا الإجراء لا يمكن التراجع عنه. هل أنت متأكد؟
           </p>
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirmOpen(false)}>
@@ -607,80 +734,6 @@ function BackupSection() {
             </Button>
             <Button variant="destructive" onClick={handleConfirmRestore} disabled={pending}>
               نعم، استبدل البيانات
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </div>
-  );
-}
-
-function MushafSection({ editions }: { editions: Selectable<MushafEdition>[] }) {
-  const [pending, startTransition] = useTransition();
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [form, setForm] = useState({ name: "", publisher: "", edition: "", description: "" });
-
-  function handleSave() {
-    const fd = new FormData();
-    fd.set("name", form.name);
-    if (form.publisher) fd.set("publisher", form.publisher);
-    if (form.edition) fd.set("edition", form.edition);
-    if (form.description) fd.set("description", form.description);
-    startTransition(async () => {
-      const result = await createMushafEdition(fd);
-      if (result.ok) {
-        toast.success("تمت الإضافة");
-        setDialogOpen(false);
-      } else toast.error(result.error);
-    });
-  }
-
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center gap-2 rounded-lg bg-muted p-3 text-xs text-muted-foreground">
-        بيانات الصفحات والأثمان تبقى غير متوفرة حتى استيراد مصدر موثوق لرواية ورش عن نافع — راجع docs/QURAN_DATA_SOURCE.md
-      </div>
-      <Button onClick={() => setDialogOpen(true)} size="sm" className="gap-1.5">
-        <Plus className="h-3.5 w-3.5" />
-        إضافة طبعة
-      </Button>
-      {editions.map((e) => (
-        <Card key={e.id}>
-          <CardContent className="flex items-center justify-between py-3.5">
-            <div>
-              <div className="flex items-center gap-2 text-sm font-medium text-foreground">
-                {e.name}
-                {e.isDefault && <Star className="h-3.5 w-3.5 fill-accent text-accent" />}
-              </div>
-              <div className="text-xs text-muted-foreground">
-                {e.riwayah} {e.publisher && `· ${e.publisher}`}
-              </div>
-              <Badge variant="outline" className="mt-1 text-[10px] text-muted-foreground">
-                {e.isVerified ? "بيانات موثوقة" : "بيانات الصفحات/الأثمان غير موثوقة بعد"}
-              </Badge>
-            </div>
-          </CardContent>
-        </Card>
-      ))}
-
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle className="font-display font-normal">طبعة مصحف جديدة</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-3">
-            <div className="space-y-1.5">
-              <Label>الاسم</Label>
-              <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="ورش عن نافع" />
-            </div>
-            <div className="space-y-1.5">
-              <Label>الناشر (اختياري)</Label>
-              <Input value={form.publisher} onChange={(e) => setForm({ ...form, publisher: e.target.value })} />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button onClick={handleSave} disabled={pending}>
-              حفظ
             </Button>
           </DialogFooter>
         </DialogContent>

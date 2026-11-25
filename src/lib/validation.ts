@@ -23,6 +23,7 @@ export const loginSchema = z.object({
 export const studentSchema = z.object({
   id: z.string().uuid().optional(),
   fullName: z.string().trim().min(2, "الاسم قصير جدًا"),
+  halaqaId: z.string().uuid().optional(),
   birthDate: z.string().date().optional().or(z.literal("")),
   birthPlace: z.string().trim().optional().or(z.literal("")),
   address: z.string().trim().optional().or(z.literal("")),
@@ -64,25 +65,4 @@ export const studentAttendanceSchema = z
     sessionDate: z.string().date(),
     sessionTemplateId: z.string().uuid(),
     status: z.enum(["PRESENT", "ABSENT", "LATE"]),
-    arrivalTime: z.string().optional(),
-    lateMinutes: z.number().int().nullable().optional(),
   });
-
-export const monthlyEvaluationSchema = z.object({
-  studentId: z.string().uuid(),
-  year: z.coerce.number().int().min(2020).max(2100),
-  month: z.coerce.number().int().min(1).max(12),
-  grade: z.enum(["EXCELLENT", "VERY_GOOD", "GOOD", "NEEDS_FOLLOW_UP"]).nullable(),
-  notes: z.string().trim().optional().or(z.literal("")),
-});
-
-export const weeklyMemorizationSchema = z.object({
-  id: z.string().uuid().optional(),
-  studentId: z.string().uuid(),
-  weekStart: z.string().date(),
-  fromSurahId: z.coerce.number().int().min(1).max(114),
-  fromVerse: z.coerce.number().int().min(1),
-  toSurahId: z.coerce.number().int().min(1).max(114),
-  toVerse: z.coerce.number().int().min(1),
-  notes: z.string().trim().optional().or(z.literal("")),
-});

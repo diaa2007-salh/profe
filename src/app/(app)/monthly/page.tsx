@@ -1,54 +1,39 @@
-import { db } from "@/lib/db/client";
-import { getMonthlySummary } from "@/lib/server/monthly";
 import { getTodayISO } from "@/lib/business/date";
-import { MonthlyClient } from "./MonthlyClient";
+import { getAccessContext } from "@/lib/server/access";
+import { getAccessibleHalaqas, getMonthlyAttendanceTable } from "@/lib/server/monthly-attendance";
+import { MonthlyAttendanceClient } from "./MonthlyAttendanceClient";
+import { z } from "zod";
 
 export const dynamic = "force-dynamic";
 
 export default async function MonthlyPage({
   searchParams,
 }: {
-  searchParams: Promise<{ student?: string; year?: string; month?: string }>;
+  searchParams: Promise<{ halaqaId?: string; year?: string; month?: string }>;
 }) {
   const params = await searchParams;
   const today = getTodayISO();
   const [todayYear, todayMonth] = today.split("-").map(Number);
 
-  const students = await db
-    .selectFrom("student")
-    .select(["id", "fullName", "isActive"])
-    .orderBy("isActive", "desc")
-    .orderBy("fullName", "asc")
-    .execute();
-
-  const studentId = params.student ?? students[0]?.id;
-  const year = Number(params.year) || todayYear;
-  const month = Number(params.month) || todayMonth;
-
-  if (!studentId) {
-    return <p className="text-sm text-muted-foreground">لا يوجد طلاب بعد. أضف طلابًا أولًا من صفحة الطلاب.</p>;
-  }
-
-  const [summary, existingEvaluation] = await Promise.all([
-    getMonthlySummary(studentId, year, month),
-    db
-      .selectFrom("monthlyEvaluation")
-      .selectAll()
-      .where("studentId", "=", studentId)
-      .where("year", "=", year)
-      .where("month", "=", month)
-      .executeTakeFirst(),
-  ]);
+  const access = await getAccessContext();
+  const yearResult = z.coerce.number().int().min(2000).max(2100).safeParse(params.year);
+  const monthResult = z.coerce.number().int().min(1).max(12).safeParse(params.month);
+  const year = yearResult.success ? yearResult.data : todayYear;
+  const month = monthResult.success ? monthResult.data : todayMonth;
+  const halaqas = await getAccessibleHalaqas(access);
+  const requestedHalaqa = z.string().uuid().safeParse(params.halaqaId);
+  const halaqaId = requestedHalaqa.success && halaqas.some((halaqa) => halaqa.id === requestedHalaqa.data)
+    ? requestedHalaqa.data
+    : undefined;
+  const table = await getMonthlyAttendanceTable(year, month, halaqaId, access);
 
   return (
-    <MonthlyClient
-      students={students}
-      studentId={studentId}
+    <MonthlyAttendanceClient
       year={year}
       month={month}
-      summary={summary}
-      existingGrade={existingEvaluation?.grade ?? null}
-      existingNotes={existingEvaluation?.notes ?? ""}
+      initialHalaqaId={halaqaId ?? ""}
+      halaqas={halaqas}
+      initialTable={table}
     />
   );
 }

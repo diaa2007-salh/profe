@@ -7,9 +7,7 @@ import {
   Home,
   Users,
   CalendarCheck2,
-  BookOpen,
-  ClipboardList,
-  BarChart3,
+  TableProperties,
   Settings2,
   Command as CommandIcon,
   MoreHorizontal,
@@ -41,9 +39,7 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/", label: "الرئيسية", icon: Home },
   { href: "/students", label: "الطلاب", icon: Users },
   { href: "/attendance", label: "الحضور", icon: CalendarCheck2 },
-  { href: "/memorization", label: "التسميع الأسبوعي", icon: BookOpen },
-  { href: "/monthly", label: "المتابعة الشهرية", icon: ClipboardList },
-  { href: "/statistics", label: "الإحصائيات", icon: BarChart3 },
+  { href: "/monthly", label: "الجدول الشهري", icon: TableProperties },
   { href: "/settings", label: "الإعدادات", icon: Settings2 },
 ];
 
@@ -68,7 +64,7 @@ export function AppShell({ teacherName, children }: { teacherName?: string; chil
     return () => document.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  const moreActive = ["/monthly", "/statistics", "/settings"].some((h) => isActiveHref(pathname, h));
+  const moreActive = ["/settings"].some((h) => isActiveHref(pathname, h));
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-background">
@@ -79,7 +75,7 @@ export function AppShell({ teacherName, children }: { teacherName?: string; chil
           </div>
           <div>
             <div className="font-display text-lg leading-tight text-foreground">دفتر الحلقة</div>
-            <div className="text-xs text-muted-foreground">{teacherName ?? "متابعة تحفيظ القرآن الكريم"}</div>
+            <div className="text-xs text-muted-foreground">{teacherName ?? "متابعة انضباط التلاميذ"}</div>
           </div>
         </div>
 

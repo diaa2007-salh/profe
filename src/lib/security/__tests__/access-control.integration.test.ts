@@ -16,8 +16,6 @@ let createdTeacherProfile = false;
 
 const attendanceActions = await import("@/app/(app)/attendance/actions");
 const studentActions = await import("@/app/(app)/students/actions");
-const memorizationActions = await import("@/app/(app)/memorization/actions");
-const monthlyActions = await import("@/app/(app)/monthly/actions");
 const settingsActions = await import("@/app/(app)/settings/actions");
 const backupActions = await import("@/app/(app)/settings/backup/actions");
 
@@ -34,10 +32,11 @@ beforeAll(async () => {
   if (!user) {
     await db
       .insertInto("appUser")
-      .values({ id: REAL_SESSION_USER_ID, email: "test-security@example.invalid", passwordHash: "not-a-real-hash" })
+      .values({ id: REAL_SESSION_USER_ID, email: "test-security@example.invalid", passwordHash: "not-a-real-hash", role: "ADMIN" })
       .execute();
     createdTestUser = true;
   }
+  await db.updateTable("appUser").set({ role: "ADMIN" }).where("id", "=", REAL_SESSION_USER_ID).execute();
   const profile = await db
     .selectFrom("teacherProfile")
     .select("id")
@@ -85,20 +84,6 @@ describe("access control — every mutation rejects when there is no session at 
     await expect(studentActions.archiveStudent(NONEXISTENT_ID)).rejects.toThrow();
   });
 
-  it("memorization: upsertWeeklyMemorization rejects unauthenticated", async () => {
-    await expect(
-      memorizationActions.upsertWeeklyMemorization(
-        fd({ studentId: NONEXISTENT_ID, weekStart: "2027-01-01", fromSurahId: "1", fromVerse: "1", toSurahId: "1", toVerse: "2" })
-      )
-    ).rejects.toThrow();
-  });
-
-  it("monthly: saveMonthlyEvaluation rejects unauthenticated", async () => {
-    await expect(
-      monthlyActions.saveMonthlyEvaluation(fd({ studentId: NONEXISTENT_ID, year: "2027", month: "1", grade: "GOOD" }))
-    ).rejects.toThrow();
-  });
-
   it("settings: every settings mutation rejects unauthenticated", async () => {
     await expect(settingsActions.updateTeacherProfile(fd({ fullName: "Attacker" }))).rejects.toThrow();
     await expect(settingsActions.upsertAcademicYear(fd({ label: "x", startDate: "2027-01-01", endDate: "2027-02-01" }))).rejects.toThrow();
@@ -110,7 +95,7 @@ describe("access control — every mutation rejects when there is no session at 
 
   it("backup: both exportBackup and restoreBackup reject unauthenticated -- this is the most sensitive mutation in the app", async () => {
     await expect(backupActions.exportBackup()).rejects.toThrow();
-    await expect(backupActions.restoreBackup(JSON.stringify({ backupVersion: "1.1", exportedAt: "x", data: {} }))).rejects.toThrow();
+    await expect(backupActions.restoreBackup(JSON.stringify({ backupVersion: "2.0", exportedAt: "x", data: {} }))).rejects.toThrow();
   });
 });
 
@@ -170,22 +155,6 @@ describe("access control — a valid session with attacker-supplied ids for OTHE
     );
     expect(result.ok).toBe(false);
     const orphaned = await db.selectFrom("holiday").select("id").where("name", "=", "Attacker Holiday").execute();
-    expect(orphaned).toHaveLength(0);
-  });
-
-  it("saveMonthlyEvaluation with a nonexistent studentId fails via FK, no orphaned evaluation created", async () => {
-    const result = await monthlyActions.saveMonthlyEvaluation(fd({ studentId: NONEXISTENT_ID, year: "2027", month: "6", grade: "GOOD" }));
-    expect(result.ok).toBe(false);
-    const orphaned = await db.selectFrom("monthlyEvaluation").select("id").where("studentId", "=", NONEXISTENT_ID).execute();
-    expect(orphaned).toHaveLength(0);
-  });
-
-  it("upsertWeeklyMemorization with a nonexistent studentId fails, no orphaned record created", async () => {
-    const result = await memorizationActions.upsertWeeklyMemorization(
-      fd({ studentId: NONEXISTENT_ID, weekStart: "2027-01-01", fromSurahId: "1", fromVerse: "1", toSurahId: "1", toVerse: "2" })
-    );
-    expect(result.ok).toBe(false);
-    const orphaned = await db.selectFrom("weeklyMemorization").select("id").where("studentId", "=", NONEXISTENT_ID).execute();
     expect(orphaned).toHaveLength(0);
   });
 

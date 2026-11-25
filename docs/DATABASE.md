@@ -1,84 +1,47 @@
-# DATABASE.md
+# Database
 
-PostgreSQL 16. Schema in `db/migrations/0001_init.sql`, applied directly
-with `psql` (see the Prisma deviation in PRODUCTION_MIGRATION.md for why).
+PostgreSQL 16 (including Neon). SQL migrations in `db/migrations/` are
+applied manually with `psql`; there is no automated migration runner.
 
-## Applying migrations
+## Migration order
+
+- Fresh database: apply `0001_init.sql`, then `0002_optional_late_minutes.sql`,
+  `0003_attendance_idempotency.sql`, and `0004_roles_halaqas.sql`.
+- Existing database created from `0001`: apply `0002`, `0003`, and `0004` in
+  that order.
+- `0005_drop_study_tracking_DATA_LOSS.sql` is a separate, irreversible
+  deletion of historical study-tracking tables. Verify an external backup
+  and obtain explicit owner approval before running it on production.
+
+Example:
 
 ```bash
-psql "$DATABASE_URL" -f db/migrations/0001_init.sql
+psql "$DATABASE_URL" -f db/migrations/0004_roles_halaqas.sql
 ```
 
-New migrations should be added as `db/migrations/000N_description.sql` and
-applied the same way, in order. There is no automated migration runner —
-for a single-teacher app with one deployment, this was judged simpler and
-more transparent than adding a migration-tracking table and runner for its
-own sake. Revisit this if the app ever needs to support multiple
-independent deployments (see "future multi-tenant" note below).
+## Important constraints
 
-## Regenerating TypeScript types
+- `student_attendance` is unique by `(student_id, session_date,
+  session_template_id)`: different sessions on a day remain distinct.
+- `teacher_attendance` is unique by teacher profile, date, and session.
+- Bulk preparation inserts only absent attendance rows and preserves
+  existing `ABSENT` and `LATE` records in one transaction.
+- `late_minutes` remains nullable for historical compatibility. New writes
+  leave it null; arrival time is the only late detail used by the interface.
+- `student.halaqa_id` and `teacher_halaqa` enforce data scoping in server
+  queries. Admin accounts may access all halaqas; teachers may access only
+  their assignments.
+- The cancellation exclusion constraint prevents overlapping ranges for the
+  same session (or all sessions); the active-year index permits one active
+  academic year.
+
+## Type generation
 
 ```bash
 pnpm run db:types
 ```
 
-Runs `kysely-codegen` against `$DATABASE_URL`, then re-patches the columns
-that are SQL `DATE` (not `TIMESTAMPTZ`) back to `string` — see
-`scripts/codegen-db-types.mjs` and the note in `docs/ARCHITECTURE.md`. Run
-this after any migration that adds, removes, or retypes a column.
-
-## Real constraints doing real work
-
-These were each verified by attempting to violate them and confirming
-Postgres rejects the attempt (see the integration test suites, not just
-this description):
-
-- **`session_cancellation` — `EXCLUDE USING gist`**: two cancellation
-  periods for the same session (or both "all sessions",
-  `session_template_id IS NULL`) cannot overlap. Requires the
-  `btree_gist` extension.
-- **`student_attendance` — `CHECK (late_requires_arrival)`**: `LATE`
-  requires `arrival_time`; `late_minutes` is optional so existing calculated
-  values remain intact while new records can omit them. Every other status
-  requires both to be `NULL`. Enforced at the database, not just in the
-  Server Action. Migration `0002_optional_late_minutes.sql` updates this
-  constraint without changing existing attendance data.
-- **`student_attendance` — `UNIQUE (student_id, session_date,
-  session_template_id)`**: attendance is keyed per student, date, and
-  session because a day may contain multiple sessions. Single-student
-  updates use `ON CONFLICT ... DO UPDATE`; bulk preparation uses
-  `ON CONFLICT ... DO NOTHING` to preserve an existing ABSENT/LATE record.
-  This unique constraint already exists in the initial schema.
-- **`academic_year` — partial unique index `WHERE is_active`**: at most one
-  academic year active at a time.
-- **`monthly_evaluation` — `UNIQUE (student_id, year, month)`**: one
-  evaluation row per student per month, upserted.
-
-## What's deliberately NOT stored
-
-Per spec section 28 ("don't store derived numbers if they can be
-computed"), `monthly_evaluation` holds only the teacher's own judgment —
-`grade` and `notes`. Every number shown on the Monthly Follow-up and
-Statistics pages (sessions held, present/late/absent counts, attendance
-rate, total late minutes) is computed live from `teacher_attendance` /
-`student_attendance` / `weekly_memorization` — see
-`src/lib/server/monthly.ts` and `statistics.ts`. There is nothing to keep
-in sync or invalidate.
-
-## Quran reference data
-
-`quran_surah` is seeded with all 114 canonical surah numbers and Arabic
-names (riwayah-independent, safe to hard-code). `verse_count` is `NULL`
-for every row and must stay that way until a verified Warsh-specific
-source is imported — see `docs/QURAN_DATA_SOURCE.md`. `mushaf_page` and
-`mushaf_thumn` exist as schema only, with zero rows, for the same reason.
-
-## Future multi-tenant note
-
-The schema is single-teacher by design (no `teacher_id` foreign keys
-anywhere), matching the spec's explicit scope. If this ever needs to
-support multiple teachers/sections, the migration path is: add a
-`teacher_id`/`section_id` column to `student`, `academic_year`,
-`session_template`, and cascade from there — every other table already
-reaches those through existing foreign keys, so the blast radius is
-smaller than it might look.
+`scripts/codegen-db-types.mjs` regenerates Kysely types and reapplies the
+SQL `DATE`-as-string adjustments. The current generated types deliberately
+omit tables removed from application code; regenerate after applying the
+final destructive migration.

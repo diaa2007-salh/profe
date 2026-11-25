@@ -7,7 +7,7 @@ import type { ColumnType } from "kysely";
 
 export type AttendanceStatus = "ABSENT" | "LATE" | "PRESENT";
 
-export type EvaluationGrade = "EXCELLENT" | "GOOD" | "NEEDS_FOLLOW_UP" | "VERY_GOOD";
+export type AppRole = "ADMIN" | "TEACHER";
 
 export type Generated<T> = T extends ColumnType<infer S, infer I, infer U>
   ? ColumnType<S, I | undefined, U>
@@ -49,7 +49,20 @@ export interface AppUser {
   email: string;
   id: Generated<string>;
   passwordHash: string;
+  role: Generated<AppRole>;
   updatedAt: Generated<Timestamp>;
+}
+
+export interface Halaqa {
+  createdAt: Generated<Timestamp>;
+  id: Generated<string>;
+  name: string;
+}
+
+export interface TeacherHalaqa {
+  createdAt: Generated<Timestamp>;
+  halaqaId: string;
+  teacherProfileId: string;
 }
 
 export interface Holiday {
@@ -60,51 +73,6 @@ export interface Holiday {
   id: Generated<string>;
   name: string;
   startDate: string;
-}
-
-export interface MonthlyEvaluation {
-  createdAt: Generated<Timestamp>;
-  grade: EvaluationGrade | null;
-  id: Generated<string>;
-  month: number;
-  notes: string | null;
-  studentId: string;
-  updatedAt: Generated<Timestamp>;
-  year: number;
-}
-
-export interface MushafEdition {
-  description: string | null;
-  edition: string | null;
-  id: Generated<string>;
-  isDefault: Generated<boolean>;
-  isVerified: Generated<boolean>;
-  name: string;
-  publisher: string | null;
-  riwayah: Generated<string>;
-}
-
-export interface MushafPage {
-  id: Generated<string>;
-  mushafEditionId: string;
-  pageNumber: number;
-  startVerse: number;
-  surahId: number;
-}
-
-export interface MushafThumn {
-  id: Generated<string>;
-  mushafEditionId: string;
-  startVerse: number;
-  surahId: number;
-  thumnNumber: number;
-}
-
-export interface QuranSurah {
-  id: number;
-  nameAr: string;
-  sourceNote: string | null;
-  verseCount: number | null;
 }
 
 export interface SessionCancellation {
@@ -135,6 +103,7 @@ export interface Student {
   fullName: string;
   guardianName: string | null;
   guardianPhone: string | null;
+  halaqaId: Generated<string>;
   id: Generated<string>;
   isActive: Generated<boolean>;
   photoUrl: string | null;
@@ -159,6 +128,7 @@ export interface TeacherAttendance {
   sessionDate: string;
   sessionTemplateId: string;
   status: TeacherStatus;
+  teacherProfileId: Generated<string | null>;
   updatedAt: Generated<Timestamp>;
 }
 
@@ -173,34 +143,17 @@ export interface TeacherProfile {
   userId: string;
 }
 
-export interface WeeklyMemorization {
-  createdAt: Generated<Timestamp>;
-  fromSurahId: number;
-  fromVerse: number;
-  id: Generated<string>;
-  notes: string | null;
-  studentId: string;
-  toSurahId: number;
-  toVerse: number;
-  updatedAt: Generated<Timestamp>;
-  weekStart: string;
-}
-
 export interface DB {
   academicYear: AcademicYear;
   appSettings: AppSettings;
   appUser: AppUser;
+  halaqa: Halaqa;
   holiday: Holiday;
-  monthlyEvaluation: MonthlyEvaluation;
-  mushafEdition: MushafEdition;
-  mushafPage: MushafPage;
-  mushafThumn: MushafThumn;
-  quranSurah: QuranSurah;
   sessionCancellation: SessionCancellation;
   sessionTemplate: SessionTemplate;
   student: Student;
   studentAttendance: StudentAttendance;
   teacherAttendance: TeacherAttendance;
+  teacherHalaqa: TeacherHalaqa;
   teacherProfile: TeacherProfile;
-  weeklyMemorization: WeeklyMemorization;
 }

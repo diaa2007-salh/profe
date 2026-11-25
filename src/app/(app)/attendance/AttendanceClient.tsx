@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { Card, CardContent } from "@/components/ui/card";
@@ -18,6 +18,10 @@ import type { Student, StudentAttendance } from "@/lib/db/types";
 import type { DailySessionState } from "@/lib/business/session-state";
 
 type AttendanceStatus = "PRESENT" | "LATE" | "ABSENT";
+
+function subscribeToNoChanges() {
+  return () => {};
+}
 
 const STATE_MESSAGE: Partial<Record<DailySessionState, string>> = {
   NOT_SCHOOL_DAY: "هذا اليوم خارج السنة الدراسية — لا يمكن تسجيل الحضور.",
@@ -54,13 +58,16 @@ export function AttendanceClient({
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [query, setQuery] = useState("");
+  const getDisplayedDate = useCallback(
+    () => (hasExplicitDate ? date : getLocalTodayISO()),
+    [date, hasExplicitDate]
+  );
+  const displayedDate = useSyncExternalStore(subscribeToNoChanges, getDisplayedDate, () => date);
   const [optimisticStatuses, setOptimisticStatuses] = useState<Record<string, AttendanceStatus>>({});
   const [optimisticArrivalTimes, setOptimisticArrivalTimes] = useState<Record<string, string>>({});
   const studentWrites = useRef(new Map<string, Promise<void>>());
   const requestSequences = useRef(new Map<string, number>());
   const bulkInFlight = useRef(false);
-
-  const displayedDate = hasExplicitDate ? date : getLocalTodayISO();
 
   const activeSession = sessionTemplates.find((s) => s.id === activeSessionId)!;
   const recordsByStudent = useMemo(() => new Map(existingRecords.map((r) => [r.studentId, r])), [existingRecords]);
@@ -96,7 +103,7 @@ export function AttendanceClient({
 
   function setTeacher(status: "PRESENT" | "ABSENT") {
     const fd = new FormData();
-    fd.set("sessionDate", date);
+    fd.set("sessionDate", displayedDate);
     fd.set("sessionTemplateId", activeSessionId);
     fd.set("status", status);
     startTransition(async () => {
@@ -128,7 +135,7 @@ export function AttendanceClient({
 
     const fd = new FormData();
     fd.set("studentId", studentId);
-    fd.set("sessionDate", date);
+    fd.set("sessionDate", displayedDate);
     fd.set("sessionTemplateId", activeSessionId);
     fd.set("status", status);
 
@@ -173,7 +180,7 @@ export function AttendanceClient({
     bulkInFlight.current = true;
     startTransition(async () => {
       try {
-        const result = await markAllPresent(date, activeSessionId);
+        const result = await markAllPresent(displayedDate, activeSessionId);
         if (!result.ok) {
           toast.error(result.error);
           return;
@@ -181,10 +188,10 @@ export function AttendanceClient({
 
         if (result.activeCount === 0) {
           toast.info("تم تأكيد حضورك؛ لا يوجد تلاميذ نشطون.");
-        } else if (result.preparedCount === 0) {
-          toast.success("تم تأكيد حضورك؛ وحُفظت الحالات المسجلة مسبقاً دون تغيير.");
         } else {
-          toast.success(`تم تأكيد حضورك وتحضير ${result.preparedCount} تلميذاً؛ وحُفظت الحالات المسجلة مسبقاً.`);
+          toast.success(
+            `تم تأكيد حضورك. حُضّر ${result.preparedCount ?? 0} وأُبقيت حالة ${result.preservedCount ?? 0} مسجلاً دون تغيير.`
+          );
         }
         router.refresh();
       } catch {
@@ -224,7 +231,7 @@ export function AttendanceClient({
       </div>
 
       {sessionTemplates.length > 1 && (
-        <Tabs value={activeSessionId} onValueChange={(v) => router.push(`/attendance?session=${v}&date=${date}`)}>
+        <Tabs value={activeSessionId} onValueChange={(v) => router.push(`/attendance?session=${v}&date=${displayedDate}`)}>
           <TabsList>
             {sessionTemplates.map((s) => (
               <TabsTrigger key={s.id} value={s.id}>

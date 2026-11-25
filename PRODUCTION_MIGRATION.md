@@ -12,7 +12,7 @@ why each was necessary.
 | Framework | Vite SPA (client-only) | Next.js 16 (App Router) | The spec requires server-side enforcement of every business rule (teacher-absence cascade, late-minute calculation, etc.) — a pure client-side SPA has no server to enforce anything in. This is the one "rebuild" the "don't rebuild the UI" rule doesn't cover, because it's plumbing, not design: every component, color, font, and layout carried over unchanged. |
 | Database | none (in-memory mock arrays) | PostgreSQL 16 | As specified. Real instance, real constraints, not SQLite. |
 | ORM/query layer | — | **Kysely + pg** (not Prisma) | See "Deviation 1" below. |
-| Auth | none | Auth.js v5, Credentials provider, JWT sessions | Single-teacher app; no OAuth provider needed. bcrypt for password hashing. |
+| Auth | none | Auth.js v5, Credentials provider, JWT sessions | Role-scoped admin/teacher accounts; bcrypt for password hashing. |
 | Styling | Tailwind v3.4.1 | Tailwind v4 | Next.js 16's scaffold defaults to v4. Same design tokens, ported to `@theme inline` syntax. |
 
 ## Deviation 1: Prisma → Kysely
@@ -62,10 +62,9 @@ before moving to the next, per the spec's "don't accumulate errors" rule.
 | F — Sessions + cancellation | ✅ Done |
 | G — Teacher attendance | ✅ Done |
 | H — Student attendance | ✅ Done |
-| I — Weekly memorization | ✅ Done |
-| J — Monthly evaluation | ✅ Done |
-| K — Statistics | ✅ Done |
-| L — Quran/Warsh data | ⚠️ Schema + importer ready; data intentionally not populated — see `docs/QURAN_DATA_SOURCE.md` |
+| I — Discipline-only interface and dashboard | ✅ Done |
+| J — Monthly attendance matrix + Excel export | ✅ Done |
+| K — Role and halaqa scoping | ✅ Done |
 | M — Backup/restore | ✅ Done |
 | N — Security | ⚠️ Partial — see `docs/DEPLOYMENT.md` and the final report |
 | O — Testing | ✅ 70 automated tests (unit + real-Postgres integration); browser E2E blocked by session-local infrastructure instability, not an app defect — see final report |
@@ -73,3 +72,8 @@ before moving to the next, per the spec's "don't accumulate errors" rule.
 
 See the conversation's final report for the complete, itemized
 ✅/⚠️/🔒/❌ breakdown with actual test results.
+
+Legacy study-tracking tables remain in the original schema migration for
+compatibility. Their removal is isolated in
+`db/migrations/0005_drop_study_tracking_DATA_LOSS.sql`; do not run it in
+production without a verified backup and explicit owner approval.

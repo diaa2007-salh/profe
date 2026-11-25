@@ -7,7 +7,7 @@ See `.env.example` for the template. Never commit real values.
 | Variable | Notes |
 |---|---|
 | `DATABASE_URL` | Postgres connection string. In production, use the provider's **pooled** connection string (e.g. Neon's pgbouncer endpoint) — serverless functions open many short-lived connections. |
-| `AUTH_SECRET` | Generate with `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`. Rotating it invalidates every existing session. |
+| `JWT_SECRET` | Generate with `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`. Rotating it invalidates every existing session. |
 | `NEXT_PUBLIC_APP_URL` | Public base URL of the deployment. |
 | `AUTH_TRUST_HOST` | Set to `true` on Vercel or behind any reverse proxy — Auth.js needs this to trust the forwarded host header. |
 
@@ -28,11 +28,14 @@ sufficient.
 ## Database setup on a real host
 
 1. Provision Postgres (Neon, RDS, etc.).
-2. Apply the schema: `psql "$DATABASE_URL" -f db/migrations/0001_init.sql`.
-3. Seed the canonical surah names (safe, riwayah-independent data) if the
-   fresh database doesn't already have them — see the `INSERT INTO
-   quran_surah` block used during development, or write a small
-   `scripts/seed-surahs.mjs` following the same list.
+2. On existing databases that already applied `0001`, apply the
+   non-destructive migrations in order: `0002_optional_late_minutes.sql`,
+   `0003_attendance_idempotency.sql`, then `0004_roles_halaqas.sql`. Fresh
+   databases should apply `0001_init.sql` first, then migrations `0002`
+   through `0004` in order.
+3. Do not apply `0005_drop_study_tracking_DATA_LOSS.sql` on production
+   until a verified backup exists and the owner explicitly approves its
+   irreversible deletion of historical study-tracking data.
 4. Do **not** run any seed script that creates demo students/attendance in
    production — those are for local development only.
 

@@ -7,9 +7,10 @@ import { getSessionStateContext } from "@/lib/server/session-state.server";
 import { getNowTimeHHMM } from "@/lib/business/date";
 import { canRecordStudentAttendance } from "@/lib/business/session-state";
 import { bulkAttendanceSchema, teacherAttendanceSchema, studentAttendanceSchema } from "@/lib/validation";
+import { canAccessStudent, getAccessContext, isAdmin } from "@/lib/server/access";
 
 export type ActionResult =
-  | { ok: true; preparedCount?: number; activeCount?: number; arrivalTime?: string }
+  | { ok: true; preparedCount?: number; activeCount?: number; preservedCount?: number; arrivalTime?: string }
   | { ok: false; error: string };
 
 async function requireSession() {
@@ -18,20 +19,16 @@ async function requireSession() {
   return session;
 }
 
-async function isAttendanceOwner(): Promise<boolean> {
-  const session = await requireSession();
-  const userId = session.user?.id;
-  if (!userId) return false;
-  const profile = await db
-    .selectFrom("teacherProfile")
-    .select("id")
-    .where("userId", "=", userId)
-    .executeTakeFirst();
-  return Boolean(profile);
+async function getAttendanceAccess() {
+  await requireSession();
+  const access = await getAccessContext();
+  const authorized = isAdmin(access) || Boolean(access.teacherProfileId && access.halaqaIds.length);
+  return authorized ? access : null;
 }
 
 export async function recordTeacherAttendance(formData: FormData): Promise<ActionResult> {
-  if (!(await isAttendanceOwner())) return { ok: false, error: "غير مصرح بتسجيل الحضور" };
+  const access = await getAttendanceAccess();
+  if (!access?.teacherProfileId) return { ok: false, error: "غير مصرح بتسجيل الحضور" };
 
   const parsed = teacherAttendanceSchema.safeParse(Object.fromEntries(formData));
   if (!parsed.success) return { ok: false, error: "بيانات غير صالحة" };
@@ -40,35 +37,37 @@ export async function recordTeacherAttendance(formData: FormData): Promise<Actio
   // RULE 2/3/4: cancelled/holiday/out-of-year sessions can't have any
   // attendance recorded at all, teacher included. Re-derive from the DB —
   // never trust that the UI only offered this action when it was legal.
-  const ctx = await getSessionStateContext(sessionDate, sessionTemplateId);
+  const ctx = await getSessionStateContext(sessionDate, sessionTemplateId, access.teacherProfileId);
   if (!ctx) return { ok: false, error: "الحصة غير موجودة" };
   if (!["SCHEDULED", "TEACHER_PRESENT", "TEACHER_ABSENT"].includes(ctx.state)) {
     return { ok: false, error: "لا يمكن تسجيل الحضور — الحصة ملغاة أو في عطلة أو خارج السنة الدراسية" };
   }
 
   try {
-    // Real UPDATE-not-INSERT on edit (spec rule 9), backed by the DB's own
-    // unique(session_date, session_template_id) constraint (spec rule 8).
-    await db
-      .insertInto("teacherAttendance")
-      .values({ sessionDate, sessionTemplateId, status })
-      .onConflict((oc) =>
-        oc.columns(["sessionDate", "sessionTemplateId"]).doUpdateSet({ status, updatedAt: new Date() })
-      )
-      .execute();
-
-    // RULE: if the teacher is switched to ABSENT after students were
-    // already marked, those records no longer represent a valid session
-    // (RULE 11: teacher absence never implies student absence either —
-    // the correct move is to remove the now-invalid records, not silently
-    // reinterpret them).
-    if (status === "ABSENT") {
-      await db
-        .deleteFrom("studentAttendance")
-        .where("sessionDate", "=", sessionDate)
-        .where("sessionTemplateId", "=", sessionTemplateId)
+    await db.transaction().execute(async (trx) => {
+      await trx
+        .insertInto("teacherAttendance")
+        .values({ sessionDate, sessionTemplateId, status, teacherProfileId: access.teacherProfileId! })
+        .onConflict((oc) =>
+          oc.columns(["teacherProfileId", "sessionDate", "sessionTemplateId"]).doUpdateSet({ status, updatedAt: new Date() })
+        )
         .execute();
-    }
+
+      if (status === "ABSENT") {
+        let deleteQuery = trx
+          .deleteFrom("studentAttendance")
+          .where("sessionDate", "=", sessionDate)
+          .where("sessionTemplateId", "=", sessionTemplateId);
+        if (!isAdmin(access)) {
+          deleteQuery = deleteQuery.where(
+            "studentId",
+            "in",
+            trx.selectFrom("student").select("id").where("halaqaId", "in", access.halaqaIds)
+          );
+        }
+        await deleteQuery.execute();
+      }
+    });
   } catch (err) {
     console.error("[attendance] teacher upsert failed", err);
     return { ok: false, error: "تعذّر حفظ حضور المعلم" };
@@ -80,7 +79,8 @@ export async function recordTeacherAttendance(formData: FormData): Promise<Actio
 }
 
 export async function recordStudentAttendance(formData: FormData): Promise<ActionResult> {
-  if (!(await isAttendanceOwner())) return { ok: false, error: "غير مصرح بتسجيل الحضور" };
+  const access = await getAttendanceAccess();
+  if (!access) return { ok: false, error: "غير مصرح بتسجيل الحضور" };
 
   const raw = Object.fromEntries(formData);
   const parsed = studentAttendanceSchema.safeParse(raw);
@@ -88,6 +88,9 @@ export async function recordStudentAttendance(formData: FormData): Promise<Actio
     return { ok: false, error: parsed.error.issues[0]?.message ?? "بيانات غير صالحة" };
   }
   const { studentId, sessionDate, sessionTemplateId, status } = parsed.data;
+  if (!(await canAccessStudent(access, studentId))) {
+    return { ok: false, error: "التلميذ غير موجود أو غير متاح لهذا المستخدم" };
+  }
 
   const student = await db
     .selectFrom("student")
@@ -100,7 +103,7 @@ export async function recordStudentAttendance(formData: FormData): Promise<Actio
   // RULE 1/7: server-side re-derivation, not a trusted client flag. This is
   // the exact check the spec says to also verify by attempting a direct
   // mutation while the teacher is ABSENT — see the integration test.
-  const ctx = await getSessionStateContext(sessionDate, sessionTemplateId);
+  const ctx = await getSessionStateContext(sessionDate, sessionTemplateId, access.teacherProfileId ?? undefined);
   if (!ctx || !canRecordStudentAttendance(ctx.state)) {
     return { ok: false, error: "لا يمكن تسجيل حضور الطلاب لهذه الحصة (المعلم غائب أو الحصة غير فعالة)" };
   }
@@ -140,12 +143,13 @@ export async function recordStudentAttendance(formData: FormData): Promise<Actio
 }
 
 export async function markAllPresent(sessionDate: string, sessionTemplateId: string): Promise<ActionResult> {
-  if (!(await isAttendanceOwner())) return { ok: false, error: "غير مصرح بتسجيل الحضور" };
+  const access = await getAttendanceAccess();
+  if (!access?.teacherProfileId) return { ok: false, error: "غير مصرح بتسجيل الحضور" };
 
   const parsed = bulkAttendanceSchema.safeParse({ sessionDate, sessionTemplateId });
   if (!parsed.success) return { ok: false, error: "بيانات غير صالحة" };
   const { sessionDate: validDate, sessionTemplateId: validSessionId } = parsed.data;
-  const ctx = await getSessionStateContext(validDate, validSessionId);
+  const ctx = await getSessionStateContext(validDate, validSessionId, access.teacherProfileId);
   if (!ctx || !["SCHEDULED", "TEACHER_PRESENT", "TEACHER_ABSENT"].includes(ctx.state)) {
     return { ok: false, error: "لا يمكن تسجيل حضور الطلاب لهذه الحصة" };
   }
@@ -154,19 +158,22 @@ export async function markAllPresent(sessionDate: string, sessionTemplateId: str
     const result = await db.transaction().execute(async (trx) => {
       await trx
         .insertInto("teacherAttendance")
-        .values({ sessionDate: validDate, sessionTemplateId: validSessionId, status: "PRESENT" })
+        .values({
+          sessionDate: validDate,
+          sessionTemplateId: validSessionId,
+          status: "PRESENT",
+          teacherProfileId: access.teacherProfileId!,
+        })
         .onConflict((oc) =>
-          oc.columns(["sessionDate", "sessionTemplateId"]).doUpdateSet({ status: "PRESENT", updatedAt: new Date() })
+          oc.columns(["teacherProfileId", "sessionDate", "sessionTemplateId"]).doUpdateSet({ status: "PRESENT", updatedAt: new Date() })
         )
         .execute();
 
-      const activeStudents = await trx
-        .selectFrom("student")
-        .select("id")
-        .where("isActive", "=", true)
-        .execute();
+      let activeQuery = trx.selectFrom("student").select("id").where("isActive", "=", true);
+      if (!isAdmin(access)) activeQuery = activeQuery.where("halaqaId", "in", access.halaqaIds);
+      const activeStudents = await activeQuery.execute();
 
-      if (activeStudents.length === 0) return { preparedCount: 0, activeCount: 0 };
+      if (activeStudents.length === 0) return { preparedCount: 0, activeCount: 0, preservedCount: 0 };
 
       const inserted = await trx
         .insertInto("studentAttendance")
@@ -184,7 +191,11 @@ export async function markAllPresent(sessionDate: string, sessionTemplateId: str
         .returning("studentId")
         .execute();
 
-      return { preparedCount: inserted.length, activeCount: activeStudents.length };
+      return {
+        preparedCount: inserted.length,
+        activeCount: activeStudents.length,
+        preservedCount: activeStudents.length - inserted.length,
+      };
     });
 
     revalidatePath("/attendance");

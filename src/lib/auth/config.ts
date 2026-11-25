@@ -12,7 +12,7 @@ const credentialsSchema = z.object({
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   session: { strategy: "jwt" },
-  secret: process.env.AUTH_SECRET, // explicit rather than relying on the implicit env convention, for auditability
+  secret: process.env.JWT_SECRET,
   // Driven by env, not hardcoded — blindly trusting the forwarded host
   // header is only correct behind a trusted reverse proxy (Vercel, etc.),
   // which is exactly what AUTH_TRUST_HOST documents in .env.example.

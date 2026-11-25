@@ -17,9 +17,24 @@ import type { Student as StudentTable } from "@/lib/db/types";
 
 type Student = Selectable<StudentTable>;
 
-const EMPTY_FORM = { id: "", fullName: "", birthDate: "", birthPlace: "", address: "", guardianName: "", guardianPhone: "" };
+const EMPTY_FORM = {
+  id: "",
+  fullName: "",
+  halaqaId: "",
+  birthDate: "",
+  birthPlace: "",
+  address: "",
+  guardianName: "",
+  guardianPhone: "",
+};
 
-export function StudentsClient({ initialStudents }: { initialStudents: Student[] }) {
+export function StudentsClient({
+  initialStudents,
+  halaqas,
+}: {
+  initialStudents: Student[];
+  halaqas: { id: string; name: string }[];
+}) {
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -31,7 +46,7 @@ export function StudentsClient({ initialStudents }: { initialStudents: Student[]
   }, [initialStudents, showArchived, query]);
 
   function openAdd() {
-    setForm(EMPTY_FORM);
+    setForm({ ...EMPTY_FORM, halaqaId: halaqas[0]?.id ?? "" });
     setDialogOpen(true);
   }
 
@@ -39,6 +54,7 @@ export function StudentsClient({ initialStudents }: { initialStudents: Student[]
     setForm({
       id: s.id,
       fullName: s.fullName,
+      halaqaId: s.halaqaId ?? halaqas[0]?.id ?? "",
       birthDate: s.birthDate ?? "",
       birthPlace: s.birthPlace ?? "",
       address: s.address ?? "",
@@ -113,6 +129,9 @@ export function StudentsClient({ initialStudents }: { initialStudents: Student[]
                 </div>
                 <div className="space-y-1">
                   <div className="text-sm font-medium text-foreground">{student.fullName}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {halaqas.find((halaqa) => halaqa.id === student.halaqaId)?.name}
+                  </div>
                   {student.guardianPhone && (
                     <div className="flex items-center gap-1 text-xs text-muted-foreground">
                       <Phone className="h-3 w-3" />
@@ -176,6 +195,22 @@ export function StudentsClient({ initialStudents }: { initialStudents: Student[]
             <div className="space-y-1.5">
               <Label htmlFor="fullName">الاسم الكامل</Label>
               <Input id="fullName" value={form.fullName} onChange={(e) => setForm({ ...form, fullName: e.target.value })} />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="studentHalaqa">الحلقة</Label>
+              <select
+                id="studentHalaqa"
+                value={form.halaqaId}
+                onChange={(e) => setForm({ ...form, halaqaId: e.target.value })}
+                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground"
+                disabled={halaqas.length < 2}
+              >
+                {halaqas.map((halaqa) => (
+                  <option key={halaqa.id} value={halaqa.id}>
+                    {halaqa.name}
+                  </option>
+                ))}
+              </select>
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
